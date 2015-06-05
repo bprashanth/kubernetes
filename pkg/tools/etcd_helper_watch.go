@@ -242,6 +242,7 @@ func (w *etcdWatcher) translate() {
 						Status:  api.StatusFailure,
 						Message: err.Error(),
 					},
+					time.Now(),
 				})
 			}
 			return

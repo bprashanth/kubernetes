@@ -18,6 +18,7 @@ package watch
 
 import (
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
@@ -53,7 +54,8 @@ type Event struct {
 	//  * If Type is Deleted: the state of the object immediately before deletion.
 	//  * If Type is Error: *api.Status is recommended; other types may make sense
 	//    depending on context.
-	Object runtime.Object
+	Object    runtime.Object
+	TimeStamp time.Time
 }
 
 type emptyWatch chan Event
@@ -105,25 +107,25 @@ func (f *FakeWatcher) ResultChan() <-chan Event {
 
 // Add sends an add event.
 func (f *FakeWatcher) Add(obj runtime.Object) {
-	f.result <- Event{Added, obj}
+	f.result <- Event{Added, obj, time.Now()}
 }
 
 // Modify sends a modify event.
 func (f *FakeWatcher) Modify(obj runtime.Object) {
-	f.result <- Event{Modified, obj}
+	f.result <- Event{Modified, obj, time.Now()}
 }
 
 // Delete sends a delete event.
 func (f *FakeWatcher) Delete(lastValue runtime.Object) {
-	f.result <- Event{Deleted, lastValue}
+	f.result <- Event{Deleted, lastValue, time.Now()}
 }
 
 // Error sends an Error event.
 func (f *FakeWatcher) Error(errValue runtime.Object) {
-	f.result <- Event{Error, errValue}
+	f.result <- Event{Error, errValue, time.Now()}
 }
 
 // Action sends an event of the requested type, for table-based testing.
 func (f *FakeWatcher) Action(action EventType, obj runtime.Object) {
-	f.result <- Event{action, obj}
+	f.result <- Event{action, obj, time.Now()}
 }

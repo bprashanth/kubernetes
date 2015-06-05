@@ -18,6 +18,7 @@ package watch
 
 import (
 	"sync"
+	"time"
 
 	"github.com/GoogleCloudPlatform/kubernetes/pkg/runtime"
 )
@@ -142,7 +143,7 @@ func (m *Broadcaster) closeAll() {
 
 // Action distributes the given event among all watchers.
 func (m *Broadcaster) Action(action EventType, obj runtime.Object) {
-	m.incoming <- Event{action, obj}
+	m.incoming <- Event{action, obj, time.Now()}
 }
 
 // Shutdown disconnects all watchers (but any queued events will still be distributed).
