@@ -43,6 +43,8 @@ import (
 
 const (
 	ProviderName = "gce"
+	// A http health check present in clusters by default.
+	defaultHttpHealthCheck = "default-health-check"
 )
 
 const k8sNodeRouteTag = "k8s-node-route"
@@ -67,7 +69,7 @@ type Config struct {
 }
 
 func init() {
-	cloudprovider.RegisterCloudProvider(ProviderName, func(config io.Reader) (cloudprovider.Interface, error) { return newGCECloud(config) })
+	cloudprovider.RegisterCloudProvider(ProviderName, func(config io.Reader) (cloudprovider.Interface, error) { return NewGCECloud(config) })
 }
 
 func getProjectAndZone() (string, string, error) {
@@ -119,8 +121,8 @@ func getNetworkName() (string, error) {
 	return parts[3], nil
 }
 
-// newGCECloud creates a new instance of GCECloud.
-func newGCECloud(config io.Reader) (*GCECloud, error) {
+// NewGCECloud creates a new instance of GCECloud.
+func NewGCECloud(config io.Reader) (*GCECloud, error) {
 	projectID, zone, err := getProjectAndZone()
 	if err != nil {
 		return nil, err
@@ -309,6 +311,175 @@ func (gce *GCECloud) waitForZoneOp(op *compute.Operation) error {
 	return waitForOp(op, func() (*compute.Operation, error) {
 		return gce.service.ZoneOperations.Get(gce.projectID, gce.zone, op.Name).Do()
 	})
+}
+
+func (gce *GCECloud) GetInstanceGroup(name string) (*compute.InstanceGroup, error) {
+	return gce.service.InstanceGroups.Get(gce.projectID, gce.zone, name).Do()
+}
+
+func (gce *GCECloud) GetBackend(name string) (*compute.BackendService, error) {
+	return gce.service.BackendServices.Get(gce.projectID, name).Do()
+}
+
+func (gce *GCECloud) GetUrlMap(name string) (*compute.UrlMap, error) {
+	return gce.service.UrlMaps.Get(gce.projectID, name).Do()
+}
+
+func (gce *GCECloud) GetProxy(name string) (*compute.TargetHttpProxy, error) {
+	return gce.service.TargetHttpProxies.Get(gce.projectID, name).Do()
+}
+
+func (gce *GCECloud) GetGlobalForwardingRule(name string) (*compute.ForwardingRule, error) {
+	return gce.service.GlobalForwardingRules.Get(gce.projectID, name).Do()
+}
+
+// CreateInstanceGroup creates an instance group with the given instances. It is the callers responsibility to add named ports.
+func (gce *GCECloud) CreateInstanceGroup(instanceNames []string, name string) (*compute.InstanceGroup, error) {
+	op, err := gce.service.InstanceGroups.Insert(
+		gce.projectID, gce.zone, &compute.InstanceGroup{Name: name}).Do()
+	if err != nil {
+		return nil, err
+	}
+	if err = gce.waitForZoneOp(op); err != nil {
+		return nil, err
+	}
+
+	instances := []*compute.InstanceReference{}
+	for _, ins := range instanceNames {
+		instances = append(instances, &compute.InstanceReference{
+			makeHostURL(gce.projectID, gce.zone, ins)})
+	}
+
+	op, err = gce.service.InstanceGroups.AddInstances(
+		gce.projectID, gce.zone, name,
+		&compute.InstanceGroupsAddInstancesRequest{
+			Instances: instances,
+		}).Do()
+
+	if err != nil {
+		// Delete instancegroup
+		return nil, err
+	}
+	if err = gce.waitForZoneOp(op); err != nil {
+		// Delete instancegroup
+		return nil, err
+	}
+	return gce.GetInstanceGroup(name)
+}
+
+func (gce *GCECloud) AddPortToInstanceGroup(ig *compute.InstanceGroup, port int64) (*compute.NamedPort, error) {
+	for _, np := range ig.NamedPorts {
+		if np.Port == port {
+			glog.Infof("Instance group %v already has named port %+v", ig.Name, np)
+			return np, nil
+		}
+	}
+	glog.Infof("Adding port %v to instance group %v with %d ports", port, ig.Name, len(ig.NamedPorts))
+	namedPort := compute.NamedPort{fmt.Sprintf("port%v", port), port}
+	ig.NamedPorts = append(ig.NamedPorts, &namedPort)
+	op, err := gce.service.InstanceGroups.SetNamedPorts(
+		gce.projectID, gce.zone, ig.Name,
+		&compute.InstanceGroupsSetNamedPortsRequest{
+			NamedPorts: ig.NamedPorts}).Do()
+	if err != nil {
+		return nil, err
+	}
+	if err = gce.waitForZoneOp(op); err != nil {
+		return nil, err
+	}
+	return &namedPort, nil
+}
+
+// TODO: This method is too tightly coupled to be generally useful.
+func (gce *GCECloud) CreateBackendForPort(ig *compute.InstanceGroup, namedPort *compute.NamedPort, bgName string) (*compute.BackendService, error) {
+	// Get the default health check
+	hc, err := gce.service.HttpHealthChecks.Get(gce.projectID, defaultHttpHealthCheck).Do()
+	if err != nil {
+		return nil, err
+	}
+	// Create a new backend
+	backend := &compute.BackendService{
+		Name:     bgName,
+		Protocol: "HTTP",
+		Backends: []*compute.Backend{
+			&compute.Backend{
+				Group: ig.SelfLink,
+			},
+		},
+		// Health checks don't matter much in the context of backend services, but the api expects one.
+		HealthChecks: []string{hc.SelfLink},
+		// This needs to match a named port on the instance group.
+		Port:     namedPort.Port,
+		PortName: namedPort.Name,
+	}
+
+	op, err := gce.service.BackendServices.Insert(gce.projectID, backend).Do()
+	if err != nil {
+		return nil, err
+	}
+	if err = gce.waitForGlobalOp(op); err != nil {
+		return nil, err
+	}
+	return gce.GetBackend(bgName)
+}
+
+// CreateUrlMap creates an url map, using the given backend service as the default service.
+func (gce *GCECloud) CreateUrlMap(backend *compute.BackendService, name string) (*compute.UrlMap, error) {
+	urlMap := &compute.UrlMap{
+		Name:           name,
+		DefaultService: backend.SelfLink,
+	}
+	op, err := gce.service.UrlMaps.Insert(gce.projectID, urlMap).Do()
+	if err != nil {
+		return nil, err
+	}
+	if err = gce.waitForGlobalOp(op); err != nil {
+		return nil, err
+	}
+	return gce.GetUrlMap(name)
+}
+
+func (gce *GCECloud) UpdateUrlMap(urlMap *compute.UrlMap) (*compute.UrlMap, error) {
+	op, err := gce.service.UrlMaps.Update(gce.projectID, urlMap.Name, urlMap).Do()
+	if err != nil {
+		return nil, err
+	}
+	if err = gce.waitForGlobalOp(op); err != nil {
+		return nil, err
+	}
+	return gce.service.UrlMaps.Get(gce.projectID, urlMap.Name).Do()
+}
+
+func (gce *GCECloud) CreateProxy(urlMap *compute.UrlMap, name string) (*compute.TargetHttpProxy, error) {
+	proxy := &compute.TargetHttpProxy{
+		Name:   name,
+		UrlMap: urlMap.SelfLink,
+	}
+	op, err := gce.service.TargetHttpProxies.Insert(gce.projectID, proxy).Do()
+	if err != nil {
+		return nil, err
+	}
+	if err = gce.waitForGlobalOp(op); err != nil {
+		return nil, err
+	}
+	return gce.GetProxy(name)
+}
+
+func (gce *GCECloud) CreateGlobalForwardingRule(proxy *compute.TargetHttpProxy, name string) (*compute.ForwardingRule, error) {
+	rule := &compute.ForwardingRule{
+		Name:       name,
+		Target:     proxy.SelfLink,
+		PortRange:  "80",
+		IPProtocol: "TCP",
+	}
+	op, err := gce.service.GlobalForwardingRules.Insert(gce.projectID, rule).Do()
+	if err != nil {
+		return nil, err
+	}
+	if err = gce.waitForGlobalOp(op); err != nil {
+		return nil, err
+	}
+	return gce.GetGlobalForwardingRule(name)
 }
 
 // GetTCPLoadBalancer is an implementation of TCPLoadBalancer.GetTCPLoadBalancer
