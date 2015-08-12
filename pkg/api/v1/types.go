@@ -1209,6 +1209,54 @@ type ServiceList struct {
 	Items []Service `json:"items" description:"list of services"`
 }
 
+// PathMap encapsulates the inputs needed to connect an alias to endpoints.
+type PathMap struct {
+	TypeMeta   `json:",inline"`
+	ObjectMeta `json:"metadata,omitempty"`
+
+	// Spec is the desired state of the pathMap
+	Spec PathMapSpec `json:"spec" description:"desired state of the pathMap"`
+	// Status is the current state of the pathMap
+	Status PathMapStatus `json:"status" description:"current state of the pathMap"`
+}
+
+// PathMapList is a collection of PathMaps
+type PathMapList struct {
+	TypeMeta `json:",inline"`
+	ListMeta `json:"metadata,omitempty"`
+
+	Items []PathMap `json:"items" description:"list of pathMaps"`
+}
+
+// ServiceRef is a reference to a single service:port.
+type ServiceRef struct {
+	Service ObjectReference
+	Port    ServicePort
+}
+
+type UrlMap map[string]*ServiceRef
+
+// PathMapSpec describes the pathMap the user wishes to exist.
+type PathMapSpec struct {
+	Host    string `json:"host" description:"optional: alias/dns that points to the service, can be host or host:port"`
+	PathMap UrlMap
+}
+
+// TLSTerminationType dictates where the secure communication will stop
+// Currently unused.
+type TLSTerminationType string
+
+const (
+	TLSTerminationEdge        TLSTerminationType = "edge"
+	TLSTerminationPassthrough TLSTerminationType = "passthrough"
+	TLSTerminationReencrypt   TLSTerminationType = "reencrypt"
+)
+
+// PathMapStatus describes the current state of this pathMap.
+type PathMapStatus struct {
+	Address string `json: "ip,omitempty"`
+}
+
 // ServiceAccount binds together:
 // * a name, understood by users, and perhaps by peripheral systems, for an identity
 // * a principal that can be authenticated and authorized

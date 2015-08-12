@@ -112,6 +112,7 @@ func expandResourceShortcut(resource string) string {
 		"po":     "pods",
 		"pv":     "persistentvolumes",
 		"pvc":    "persistentvolumeclaims",
+		"pm":     "pathmaps",
 		"quota":  "resourcequotas",
 		"rc":     "replicationcontrollers",
 		"svc":    "services",

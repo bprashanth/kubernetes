@@ -60,6 +60,7 @@ import (
 	nodeetcd "k8s.io/kubernetes/pkg/registry/minion/etcd"
 	"k8s.io/kubernetes/pkg/registry/namespace"
 	namespaceetcd "k8s.io/kubernetes/pkg/registry/namespace/etcd"
+	pathmapetcd "k8s.io/kubernetes/pkg/registry/pathmap/etcd"
 	pvetcd "k8s.io/kubernetes/pkg/registry/persistentvolume/etcd"
 	pvcetcd "k8s.io/kubernetes/pkg/registry/persistentvolumeclaim/etcd"
 	podetcd "k8s.io/kubernetes/pkg/registry/pod/etcd"
@@ -508,6 +509,7 @@ func (m *Master) init(c *Config) {
 		"persistentVolumes/status":      persistentVolumeStatusStorage,
 		"persistentVolumeClaims":        persistentVolumeClaimStorage,
 		"persistentVolumeClaims/status": persistentVolumeClaimStatusStorage,
+		"pathMaps":                      pathmapetcd.NewREST(c.DatabaseStorage),
 
 		"componentStatuses": componentstatus.NewStorage(func() map[string]apiserver.Server { return m.getServersToValidate(c) }),
 	}

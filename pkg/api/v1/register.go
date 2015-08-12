@@ -51,6 +51,8 @@ func addKnownTypes() {
 		&Daemon{},
 		&Service{},
 		&ServiceList{},
+		&PathMap{},
+		&PathMapList{},
 		&Endpoints{},
 		&EndpointsList{},
 		&Node{},
@@ -104,6 +106,8 @@ func (*Daemon) IsAnAPIObject()                    {}
 func (*DaemonList) IsAnAPIObject()                {}
 func (*Service) IsAnAPIObject()                   {}
 func (*ServiceList) IsAnAPIObject()               {}
+func (*PathMap) IsAnAPIObject()                   {}
+func (*PathMapList) IsAnAPIObject()               {}
 func (*Endpoints) IsAnAPIObject()                 {}
 func (*EndpointsList) IsAnAPIObject()             {}
 func (*Node) IsAnAPIObject()                      {}

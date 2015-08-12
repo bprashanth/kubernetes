@@ -33,6 +33,7 @@ import (
 	"github.com/golang/glog"
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/conversion"
+	"k8s.io/kubernetes/pkg/labels"
 	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/volume"
@@ -264,6 +265,7 @@ var replicationControllerColumns = []string{"CONTROLLER", "CONTAINER(S)", "IMAGE
 var serviceColumns = []string{"NAME", "CLUSTER_IP", "EXTERNAL_IP", "PORT(S)", "SELECTOR", "AGE"}
 var endpointColumns = []string{"NAME", "ENDPOINTS", "AGE"}
 var nodeColumns = []string{"NAME", "LABELS", "STATUS", "AGE"}
+var pathMapColumns = []string{"NAME", "HOST", "PATH", "SERVICE:PORT", "NODEPORT", "LABELS"}
 var eventColumns = []string{"FIRSTSEEN", "LASTSEEN", "COUNT", "NAME", "KIND", "SUBOBJECT", "REASON", "SOURCE", "MESSAGE"}
 var limitRangeColumns = []string{"NAME", "AGE"}
 var resourceQuotaColumns = []string{"NAME", "AGE"}
@@ -285,6 +287,8 @@ func (h *HumanReadablePrinter) addDefaultHandlers() {
 	h.Handler(replicationControllerColumns, printReplicationControllerList)
 	h.Handler(serviceColumns, printService)
 	h.Handler(serviceColumns, printServiceList)
+	h.Handler(pathMapColumns, printPathMap)
+	h.Handler(pathMapColumns, printPathMapList)
 	h.Handler(endpointColumns, printEndpoints)
 	h.Handler(endpointColumns, printEndpointsList)
 	h.Handler(nodeColumns, printNode)
@@ -631,6 +635,25 @@ func printService(svc *api.Service, w io.Writer, withNamespace bool, wide bool, 
 func printServiceList(list *api.ServiceList, w io.Writer, withNamespace bool, wide bool, showAll bool, columnLabels []string) error {
 	for _, svc := range list.Items {
 		if err := printService(&svc, w, withNamespace, wide, showAll, columnLabels); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printPathMap(pathMap *api.PathMap, w io.Writer, withNamespace, wide bool, showAll bool, columnLabels []string) error {
+	for url, svc := range pathMap.Spec.PathMap {
+		_, err := fmt.Fprintf(w, "%s\t%s\t%+v\t%v:%v\t%v\t%s\n", pathMap.Name, pathMap.Spec.Host, url, svc.Service.Name, svc.Port.Port, svc.Port.NodePort, labels.Set(pathMap.Labels))
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func printPathMapList(pathMapList *api.PathMapList, w io.Writer, withNamespace, wide bool, showAll bool, columnLabels []string) error {
+	for _, pathMap := range pathMapList.Items {
+		if err := printPathMap(&pathMap, w, withNamespace, wide, columnLabels); err != nil {
 			return err
 		}
 	}

@@ -36,6 +36,8 @@ func init() {
 		&Daemon{},
 		&ServiceList{},
 		&Service{},
+		&PathMap{},
+		&PathMapList{},
 		&NodeList{},
 		&Node{},
 		&Status{},
@@ -89,6 +91,8 @@ func (*Daemon) IsAnAPIObject()                    {}
 func (*DaemonList) IsAnAPIObject()                {}
 func (*Service) IsAnAPIObject()                   {}
 func (*ServiceList) IsAnAPIObject()               {}
+func (*PathMap) IsAnAPIObject()                   {}
+func (*PathMapList) IsAnAPIObject()               {}
 func (*Endpoints) IsAnAPIObject()                 {}
 func (*EndpointsList) IsAnAPIObject()             {}
 func (*Node) IsAnAPIObject()                      {}
