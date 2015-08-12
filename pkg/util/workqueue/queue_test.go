@@ -41,7 +41,6 @@ func TestBasic(t *testing.T) {
 			}
 		}(i)
 	}
-
 	// Start consumers
 	const consumers = 10
 	consumerWG := sync.WaitGroup{}

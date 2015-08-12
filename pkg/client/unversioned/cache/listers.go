@@ -290,3 +290,33 @@ func (s *StoreToEndpointsLister) GetServiceEndpoints(svc *api.Service) (ep api.E
 	err = fmt.Errorf("Could not find endpoints for service: %v", svc.Name)
 	return
 }
+
+// StoreToPathMapLister makes a Store that lists pathmaps.
+type StoreToPathMapLister struct {
+	Store
+}
+
+// List lists all pathMaps in the store.
+func (s *StoreToPathMapLister) List() (pathMap api.PathMapList, err error) {
+	for _, m := range s.Store.List() {
+		pathMap.Items = append(pathMap.Items, *(m.(*api.PathMap)))
+	}
+	return pathMap, nil
+}
+
+// GetServicePathMaps returns the pathMaps of a service, matched on service namespace/name.
+func (s *StoreToPathMapLister) GetServicePaths(svc *api.Service) (paths api.PathMapList, err error) {
+	// TODO
+	for _, m := range s.Store.List() {
+		pm := *m.(*api.PathMap)
+		for _, pathSvcRef := range pm.Spec.PathMap {
+			if svc.Name == pathSvcRef.Service.Name && svc.Namespace == pathSvcRef.Service.Namespace {
+				paths.Items = append(paths.Items, pm)
+			}
+		}
+	}
+	if len(paths.Items) == 0 {
+		err = fmt.Errorf("Could not find endpoints for service: %v", svc.Name)
+	}
+	return
+}
