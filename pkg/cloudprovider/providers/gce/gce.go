@@ -344,6 +344,7 @@ func (gce *GCECloud) CreateInstanceGroup(instanceNames []string, name string) (*
 		return nil, err
 	}
 
+	// TODO: Delete instance group if adding an instance fails.
 	instances := []*compute.InstanceReference{}
 	for _, ins := range instanceNames {
 		instances = append(instances, &compute.InstanceReference{
@@ -357,11 +358,9 @@ func (gce *GCECloud) CreateInstanceGroup(instanceNames []string, name string) (*
 		}).Do()
 
 	if err != nil {
-		// Delete instancegroup
 		return nil, err
 	}
 	if err = gce.waitForZoneOp(op); err != nil {
-		// Delete instancegroup
 		return nil, err
 	}
 	return gce.GetInstanceGroup(name)

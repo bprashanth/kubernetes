@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package gcelb
+package lb
 
 import (
 	"crypto/md5"
@@ -97,6 +97,7 @@ func (c *ClusterManager) instanceGroup(instances []string) (*compute.InstanceGro
 		return ig, nil
 	}
 
+	// TODO: We need a get->delete->add thing here.
 	glog.Infof("Creating instance group for minions %v", instances)
 	ig, err = c.cloud.CreateInstanceGroup(instances, igName)
 	if err != nil {
@@ -214,10 +215,10 @@ func (l *L7) forwardingRule() *L7 {
 // The GCE url map allows multiple hosts to share url->backend mappings without duplication, eg:
 //   Host: foo(PathMatcher1), bar(PathMatcher1,2)
 //   PathMatcher1:
-//	   /a -> b1
-//	   /b -> b2
+//     /a -> b1
+//     /b -> b2
 //   PathMatcher2:
-//	   /c -> b1
+//     /c -> b1
 // This leads to a lot of complexity in the common case, where all we want is a mapping of
 // host->{/path: backend}.
 //
@@ -225,7 +226,7 @@ func (l *L7) forwardingRule() *L7 {
 // 1. Using a single backend per PathMatcher:
 //   Host: foo(PathMatcher1,3) bar(PathMatcher1,2,3)
 //   PathMatcher1:
-//	   /a -> b1
+//     /a -> b1
 //   PathMatcher2:
 //     /c -> b1
 //   PathMatcher3:
@@ -287,7 +288,6 @@ func (l *L7) UpdateUrlMap(hostname string, urlToBackend map[string]*compute.Back
 	}
 
 	// Clobber existing path rules.
-	// TODO: Support patch via subresource?
 	pathMatcher.PathRules = []*compute.PathRule{}
 	for ep, bg := range urlToBackend {
 		pathMatcher.PathRules = append(pathMatcher.PathRules, &compute.PathRule{[]string{ep}, bg.SelfLink})
@@ -310,7 +310,7 @@ func getNameForPathMatcher(hostRule string) string {
 
 // runServer is a debug method that runs a server listening for urlmaps for a single loadbalancer.
 // Eg invocation: curl http://localhost:8082 -X POST -d '{"/test/*": 31778}'
-func RunServer(c *ClusterManager, lbName string) {
+func RunTestServer(c *ClusterManager, lbName string) {
 	l := c.NewL7(lbName)
 	if len(l.Errors) != 0 {
 		glog.Fatalf("Failed to create L7: %+v", l.Errors)

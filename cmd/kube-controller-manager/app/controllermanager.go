@@ -36,6 +36,7 @@ import (
 	clientcmdapi "k8s.io/kubernetes/pkg/client/unversioned/clientcmd/api"
 	"k8s.io/kubernetes/pkg/cloudprovider"
 	"k8s.io/kubernetes/pkg/controller/endpoint"
+	lb "k8s.io/kubernetes/pkg/controller/loadbalancer/gce"
 	"k8s.io/kubernetes/pkg/controller/namespace"
 	"k8s.io/kubernetes/pkg/controller/node"
 	"k8s.io/kubernetes/pkg/controller/persistentvolume"
@@ -197,6 +198,13 @@ func (s *CMServer) Run(_ []string) error {
 	if err != nil {
 		glog.Fatalf("Cloud provider could not be initialized: %v", err)
 	}
+
+	loadbalancerController, err := lb.NewLoadBalancerController(kubeClient, true)
+	if err != nil {
+		// TODO: Make this Errorf
+		glog.Fatalf("Cannot create loadbalancer controller %v", err)
+	}
+	go loadbalancerController.Run()
 
 	nodeController := nodecontroller.NewNodeController(cloud, kubeClient,
 		s.PodEvictionTimeout, nodecontroller.NewPodEvictor(util.NewTokenBucketRateLimiter(s.DeletingPodsQps, s.DeletingPodsBurst)),
