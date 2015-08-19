@@ -201,10 +201,10 @@ func (s *CMServer) Run(_ []string) error {
 
 	loadbalancerController, err := lb.NewLoadBalancerController(kubeClient, true)
 	if err != nil {
-		// TODO: Make this Errorf
-		glog.Fatalf("Cannot create loadbalancer controller %v", err)
+		glog.Errorf("Cannot create loadbalancer controller %v", err)
+	} else {
+		go loadbalancerController.Run()
 	}
-	go loadbalancerController.Run()
 
 	nodeController := nodecontroller.NewNodeController(cloud, kubeClient,
 		s.PodEvictionTimeout, nodecontroller.NewPodEvictor(util.NewTokenBucketRateLimiter(s.DeletingPodsQps, s.DeletingPodsBurst)),

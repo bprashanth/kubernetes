@@ -642,10 +642,12 @@ func printServiceList(list *api.ServiceList, w io.Writer, withNamespace bool, wi
 }
 
 func printPathMap(pathMap *api.PathMap, w io.Writer, withNamespace, wide bool, showAll bool, columnLabels []string) error {
-	for url, svc := range pathMap.Spec.PathMap {
-		_, err := fmt.Fprintf(w, "%s\t%s\t%+v\t%v:%v\t%v\t%s\n", pathMap.Name, pathMap.Spec.Host, url, svc.Service.Name, svc.Port.Port, svc.Port.NodePort, labels.Set(pathMap.Labels))
-		if err != nil {
-			return err
+	for subdomain, urlMap := range pathMap.Spec.PathMap {
+		for url, svc := range urlMap {
+			_, err := fmt.Fprintf(w, "%s\t%s\t%+v\t%v:%v\t%v\t%s\n", pathMap.Name, subdomain, url, svc.Service.Name, svc.Port.Port, svc.Port.NodePort, labels.Set(pathMap.Labels))
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil

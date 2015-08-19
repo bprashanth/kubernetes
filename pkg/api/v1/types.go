@@ -1239,7 +1239,7 @@ type UrlMap map[string]*ServiceRef
 // PathMapSpec describes the pathMap the user wishes to exist.
 type PathMapSpec struct {
 	Host    string `json:"host" description:"optional: alias/dns that points to the service, can be host or host:port"`
-	PathMap UrlMap
+	PathMap map[string]UrlMap
 }
 
 // TLSTerminationType dictates where the secure communication will stop

@@ -306,12 +306,14 @@ func (s *StoreToPathMapLister) List() (pathMap api.PathMapList, err error) {
 
 // GetServicePathMaps returns the pathMaps of a service, matched on service namespace/name.
 func (s *StoreToPathMapLister) GetServicePaths(svc *api.Service) (paths api.PathMapList, err error) {
-	// TODO
+	// Triple loop tldr: get a flat list of paths that have a reference to the service.
 	for _, m := range s.Store.List() {
 		pm := *m.(*api.PathMap)
-		for _, pathSvcRef := range pm.Spec.PathMap {
-			if svc.Name == pathSvcRef.Service.Name && svc.Namespace == pathSvcRef.Service.Namespace {
-				paths.Items = append(paths.Items, pm)
+		for _, subdomainToUrlMap := range pm.Spec.PathMap {
+			for _, pathSvcRef := range subdomainToUrlMap {
+				if svc.Name == pathSvcRef.Service.Name && svc.Namespace == pathSvcRef.Service.Namespace {
+					paths.Items = append(paths.Items, pm)
+				}
 			}
 		}
 	}
