@@ -119,10 +119,12 @@ func NewClusterManager(name string) (*ClusterManager, error) {
 }
 
 func (c *ClusterManager) AddNodes(nodeNames []string) error {
+	glog.Infof("Adding nodes %v", nodeNames)
 	return c.cloud.AddInstancesToInstanceGroup(c.defaultIg.Name, nodeNames)
 }
 
 func (c *ClusterManager) RemoveNodes(nodeNames []string) error {
+	glog.Infof("Removing nodes %v", nodeNames)
 	return c.cloud.RemoveInstancesFromInstanceGroup(c.defaultIg.Name, nodeNames)
 }
 

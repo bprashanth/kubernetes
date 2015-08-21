@@ -655,7 +655,7 @@ func printPathMap(pathMap *api.PathMap, w io.Writer, withNamespace, wide bool, s
 
 func printPathMapList(pathMapList *api.PathMapList, w io.Writer, withNamespace, wide bool, showAll bool, columnLabels []string) error {
 	for _, pathMap := range pathMapList.Items {
-		if err := printPathMap(&pathMap, w, withNamespace, wide, columnLabels); err != nil {
+		if err := printPathMap(&pathMap, w, withNamespace, wide, true, columnLabels); err != nil {
 			return err
 		}
 	}

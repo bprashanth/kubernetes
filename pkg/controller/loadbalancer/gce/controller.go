@@ -24,14 +24,16 @@ import (
 
 	compute "google.golang.org/api/compute/v1"
 	"k8s.io/kubernetes/pkg/api"
-	"k8s.io/kubernetes/pkg/client"
-	"k8s.io/kubernetes/pkg/client/cache"
-	"k8s.io/kubernetes/pkg/client/record"
+	client "k8s.io/kubernetes/pkg/client/unversioned"
+	"k8s.io/kubernetes/pkg/client/unversioned/cache"
+	"k8s.io/kubernetes/pkg/client/unversioned/record"
 	"k8s.io/kubernetes/pkg/controller/framework"
 	"k8s.io/kubernetes/pkg/fields"
 	"k8s.io/kubernetes/pkg/labels"
+	"k8s.io/kubernetes/pkg/runtime"
 	"k8s.io/kubernetes/pkg/util"
 	"k8s.io/kubernetes/pkg/util/workqueue"
+	"k8s.io/kubernetes/pkg/watch"
 
 	"github.com/golang/glog"
 )
@@ -42,15 +44,18 @@ var (
 	lbControllerName = "lbcontroller"
 )
 
+// taskQueue manages a work queue through an independent worker that
+// invokes the given sync function for every work item inserted.
 type taskQueue struct {
 	queue *workqueue.Type
 	sync  func(string)
 }
 
-func (t *taskQueue) Run(period time.Duration, stopCh <-chan struct{}) {
+func (t *taskQueue) run(period time.Duration, stopCh <-chan struct{}) {
 	util.Until(t.worker, period, stopCh)
 }
 
+// enqueue enqueues ns/name of the given api object in the task queue.
 func (t *taskQueue) enqueue(obj interface{}) {
 	key, err := keyFunc(obj)
 	if err != nil {
@@ -60,6 +65,7 @@ func (t *taskQueue) enqueue(obj interface{}) {
 	t.queue.Add(key)
 }
 
+// worker processes work in the queue through sync.
 func (t *taskQueue) worker() {
 	for {
 		key, _ := t.queue.Get()
@@ -69,6 +75,8 @@ func (t *taskQueue) worker() {
 	}
 }
 
+// NewTaskQueue creates a new task queue with the given sync function.
+// The sync function is called for every element inserted into the queue.
 func NewTaskQueue(syncFn func(string)) *taskQueue {
 	return &taskQueue{
 		queue: workqueue.New(),
@@ -137,14 +145,47 @@ func NewLoadBalancerController(kubeClient *client.Client, createClusterManager b
 			lbc.client, "pathMaps", api.NamespaceAll, fields.Everything()),
 		&api.PathMap{}, resyncPeriod, pathHandlers)
 	glog.Infof("Created new loadbalancer controller")
+
+	nodeHandlers := framework.ResourceEventHandlerFuncs{
+		AddFunc:    lbc.nodeQueue.enqueue,
+		DeleteFunc: lbc.nodeQueue.enqueue,
+		UpdateFunc: func(old, cur interface{}) {
+			if !reflect.DeepEqual(old, cur) {
+				lbc.nodeQueue.enqueue(cur)
+			}
+		},
+	}
+
+	lbc.nodeLister.Store, lbc.nodeController = framework.NewInformer(
+		&cache.ListWatch{
+			ListFunc: func() (runtime.Object, error) {
+				return lbc.client.Get().
+					Resource("nodes").
+					FieldsSelectorParam(fields.Everything()).
+					Do().
+					Get()
+			},
+			WatchFunc: func(resourceVersion string) (watch.Interface, error) {
+				return lbc.client.Get().
+					Prefix("watch").
+					Resource("nodes").
+					FieldsSelectorParam(fields.Everything()).
+					Param("resourceVersion", resourceVersion).Watch()
+			},
+		},
+		&api.Node{}, resyncPeriod, nodeHandlers)
+	glog.Infof("Created new loadbalancer controller")
+
 	return &lbc, nil
 }
 
+// Run starts the loadbalancer controller.
 func (lbc *loadBalancerController) Run() {
 	glog.Infof("Starting loadbalancer controller")
 	go lbc.pmController.Run(util.NeverStop)
-	lbc.pmQueue.Run(time.Second, util.NeverStop)
-	lbc.nodeQueue.Run(time.Second, util.NeverStop)
+	go lbc.nodeController.Run(util.NeverStop)
+	lbc.pmQueue.run(time.Second, util.NeverStop)
+	lbc.nodeQueue.run(time.Second, util.NeverStop)
 }
 
 // syncBackends deletes GCE backends without any paths, and creates backends for new paths.
@@ -190,6 +231,9 @@ func (lbc *loadBalancerController) syncBackends() error {
 // syncPathMap updates gce's urlmap according to the kubernetes pathmap.
 // This method assumes the appropriate backends already exist.
 func (lbc *loadBalancerController) syncPathMap(pm api.PathMap) error {
+
+	// Convert the pathmap from a subdomain: {path: kubernetes service} mapping
+	// to a subdomain: {path: gce backend for kubernetes service} mapping.
 	subdomainToUrlBackend := map[string]map[string]*compute.BackendService{}
 	for subdomain, urlMap := range pm.Spec.PathMap {
 		urlToBackend := map[string]*compute.BackendService{}
@@ -208,6 +252,8 @@ func (lbc *loadBalancerController) syncPathMap(pm api.PathMap) error {
 		}
 		subdomainToUrlBackend[subdomain] = urlToBackend
 	}
+
+	// Get the loadbalancer for the given pathmap and update its urls.
 	key, err := keyFunc(&pm)
 	if err != nil {
 		return err
@@ -238,6 +284,7 @@ func (lbc *loadBalancerController) syncPathMap(pm api.PathMap) error {
 	return nil
 }
 
+// sync manages the syncing of backends and pathmaps.
 func (lbc *loadBalancerController) sync(key string) {
 	obj, pmExists, err := lbc.pmLister.Store.GetByKey(key)
 	if err != nil {
@@ -246,6 +293,11 @@ func (lbc *loadBalancerController) sync(key string) {
 		lbc.pmQueue.queue.Add(key)
 		return
 	}
+
+	// Cleaning cluster resources of deleted pathmaps involves
+	// deleting forwarding rules, proxies and urlmaps but not
+	// backends. Backends are freed when no pathmaps reference
+	// them, in syncBackends.
 	if !pmExists {
 		glog.Infof("Pathmap %v deleted", key)
 		l, lbExists := lbc.loadBalancers[key]
@@ -259,6 +311,11 @@ func (lbc *loadBalancerController) sync(key string) {
 		delete(lbc.loadBalancers, key)
 	}
 
+	// Backends are shared across loadbalancers for efficiency. Syncing of
+	// backends should happen after deleting cluster resources of deleted
+	// pathmaps (because the reference graph is private loadbalancer
+	// resources -> backends -> instance group), but before we create
+	// cluster resources for new pathmaps.
 	if err := lbc.syncBackends(); err != nil {
 		glog.Errorf("requeuing %v: %v", key, err)
 		lbc.pmQueue.enqueue(obj)
@@ -267,6 +324,10 @@ func (lbc *loadBalancerController) sync(key string) {
 	if lbc.clusterManager == nil || !pmExists {
 		return
 	}
+
+	// Pathmap syncing involves updating the urlmap associated with a
+	// forwarding rule for a loadbalancer, with the backends created
+	// in syncBackends.
 	if err := lbc.syncPathMap(*obj.(*api.PathMap)); err != nil {
 		glog.Errorf("requeuing %v: %v", key, err)
 		lbc.pmQueue.enqueue(obj)
@@ -275,6 +336,8 @@ func (lbc *loadBalancerController) sync(key string) {
 	glog.Infof("Finished syncing %v", key)
 }
 
+// syncNodes manages the syncing of kubernetes nodes to gce instance groups.
+// The instancegroups are referenced by loadbalancer backends.
 func (lbc *loadBalancerController) syncNodes(key string) {
 	obj, nodeExists, err := lbc.nodeLister.Store.GetByKey(key)
 	if err != nil {
@@ -286,6 +349,9 @@ func (lbc *loadBalancerController) syncNodes(key string) {
 		glog.Infof("Node %v deleted", key)
 		return
 	}
+
+	// Add/Delete nodes to cluster instance group using kubernetes
+	// nodes as the source of truth.
 	oldNodes, err := lbc.clusterManager.GetNodes()
 	if err != nil {
 		lbc.nodeQueue.enqueue(obj)
@@ -294,6 +360,7 @@ func (lbc *loadBalancerController) syncNodes(key string) {
 	if err != nil {
 		lbc.nodeQueue.enqueue(obj)
 	}
+	// TODO: delete unhealthy kubernetes nodes from cluster?
 	deleteNodes := []string{}
 	addNodes := []string{}
 	for _, n := range curNodes.Items {
