@@ -42,12 +42,9 @@ import (
 )
 
 const (
-	ProviderName = "gce"
-	// A http health check present in clusters by default.
-	defaultHttpHealthCheck = "default-health-check"
+	ProviderName    = "gce"
+	k8sNodeRouteTag = "k8s-node-route"
 )
-
-const k8sNodeRouteTag = "k8s-node-route"
 
 // GCECloud is an implementation of Interface, TCPLoadBalancer and Instances for Google Compute Engine.
 type GCECloud struct {
@@ -429,37 +426,24 @@ func (gce *GCECloud) AddPortToInstanceGroup(ig *compute.InstanceGroup, port int6
 	return &namedPort, nil
 }
 
-// TODO: This method is too tightly coupled to be generally useful.
-func (gce *GCECloud) CreateBackendForPort(ig *compute.InstanceGroup, namedPort *compute.NamedPort, bgName string) (*compute.BackendService, error) {
-	// Get the default health check
-	hc, err := gce.service.HttpHealthChecks.Get(gce.projectID, defaultHttpHealthCheck).Do()
+func (gce *GCECloud) CreateBackend(bg *compute.BackendService) error {
+	op, err := gce.service.BackendServices.Insert(gce.projectID, bg).Do()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	// Create a new backend
-	backend := &compute.BackendService{
-		Name:     bgName,
-		Protocol: "HTTP",
-		Backends: []*compute.Backend{
-			&compute.Backend{
-				Group: ig.SelfLink,
-			},
-		},
-		// Health checks don't matter much in the context of backend services, but the api expects one.
-		HealthChecks: []string{hc.SelfLink},
-		// This needs to match a named port on the instance group.
-		Port:     namedPort.Port,
-		PortName: namedPort.Name,
-	}
+	return gce.waitForGlobalOp(op)
+}
 
-	op, err := gce.service.BackendServices.Insert(gce.projectID, backend).Do()
+func (gce *GCECloud) GetHttpHealthCheck(name string) (*compute.HttpHealthCheck, error) {
+	return gce.service.HttpHealthChecks.Get(gce.projectID, name).Do()
+}
+
+func (gce *GCECloud) UpdateBackend(bg *compute.BackendService) error {
+	op, err := gce.service.BackendServices.Update(gce.projectID, bg.Name, bg).Do()
 	if err != nil {
-		return nil, err
+		return err
 	}
-	if err = gce.waitForGlobalOp(op); err != nil {
-		return nil, err
-	}
-	return gce.GetBackend(bgName)
+	return gce.waitForGlobalOp(op)
 }
 
 func (gce *GCECloud) DeleteBackend(name string) error {
@@ -526,6 +510,14 @@ func (gce *GCECloud) CreateProxy(urlMap *compute.UrlMap, name string) (*compute.
 	return gce.GetProxy(name)
 }
 
+func (gce *GCECloud) SetUrlMapForProxy(proxy *compute.TargetHttpProxy, urlMap *compute.UrlMap) error {
+	op, err := gce.service.TargetHttpProxies.SetUrlMap(gce.projectID, proxy.Name, &compute.UrlMapReference{urlMap.SelfLink}).Do()
+	if err != nil {
+		return err
+	}
+	return gce.waitForGlobalOp(op)
+}
+
 func (gce *GCECloud) DeleteProxy(name string) error {
 	op, err := gce.service.TargetHttpProxies.Delete(gce.projectID, name).Do()
 	if err != nil {
@@ -537,11 +529,11 @@ func (gce *GCECloud) DeleteProxy(name string) error {
 	return gce.waitForGlobalOp(op)
 }
 
-func (gce *GCECloud) CreateGlobalForwardingRule(proxy *compute.TargetHttpProxy, name string) (*compute.ForwardingRule, error) {
+func (gce *GCECloud) CreateGlobalForwardingRule(proxy *compute.TargetHttpProxy, name string, portRange string) (*compute.ForwardingRule, error) {
 	rule := &compute.ForwardingRule{
 		Name:       name,
 		Target:     proxy.SelfLink,
-		PortRange:  "80",
+		PortRange:  portRange,
 		IPProtocol: "TCP",
 	}
 	op, err := gce.service.GlobalForwardingRules.Insert(gce.projectID, rule).Do()
@@ -552,6 +544,14 @@ func (gce *GCECloud) CreateGlobalForwardingRule(proxy *compute.TargetHttpProxy, 
 		return nil, err
 	}
 	return gce.GetGlobalForwardingRule(name)
+}
+
+func (gce *GCECloud) SetProxyForGlobalForwardingRule(fw *compute.ForwardingRule, proxy *compute.TargetHttpProxy) error {
+	op, err := gce.service.GlobalForwardingRules.SetTarget(gce.projectID, fw.Name, &compute.TargetReference{proxy.SelfLink}).Do()
+	if err != nil {
+		return err
+	}
+	return gce.waitForGlobalOp(op)
 }
 
 func (gce *GCECloud) DeleteGlobalForwardingRule(name string) error {

@@ -32,8 +32,10 @@ import (
 )
 
 const (
-	urlMapPort  = 8082
-	defaultPort = 80
+	urlMapPort             = 8082
+	defaultPort            = 80
+	defaultPortRange       = "80"
+	defaultHttpHealthCheck = "default-health-check"
 
 	// A single target proxy/urlmap/forwarding rule is created per loadbalancer.
 	// Tagged with the name of the IngressPoint.
@@ -65,37 +67,9 @@ type ClusterManager struct {
 	ClusterName    string
 	defaultIg      *compute.InstanceGroup
 	defaultBackend *compute.BackendService
+	backendPool    *Backends
 	// TODO: Include default health check
 	cloud *gce.GCECloud
-}
-
-// GetBackend returns a single backend
-func (c *ClusterManager) GetBackend(port int64) (*compute.BackendService, error) {
-	return c.cloud.GetBackend(bgName(port))
-}
-
-// Backend will return a backend for the given port. If one doesn't already exist, it
-// will create it. If the port isn't one of the named ports in the instance group, it
-// will add it. It returns a backend ready for insertion into a urlmap.
-func (c *ClusterManager) Backend(port int64) (*compute.BackendService, error) {
-	if c.defaultIg == nil {
-		return nil, fmt.Errorf("Cannot create backend without an instance group.")
-	}
-	namedPort, err := c.cloud.AddPortToInstanceGroup(c.defaultIg, port)
-	if err != nil {
-		return nil, err
-	}
-	bg, err := c.GetBackend(port)
-	if bg != nil {
-		glog.Infof("Backend %v already exists", bg.Name)
-		return bg, nil
-	}
-	glog.Infof("Creating backend for instance group %v and port %v", c.defaultIg.Name, port)
-	return c.cloud.CreateBackendForPort(c.defaultIg, namedPort, bgName(port))
-}
-
-func (c *ClusterManager) DeleteBackend(bg *compute.BackendService) error {
-	return c.cloud.DeleteBackend(bg.Name)
 }
 
 // NewClusterManager creates a cluster manager for shared resources.
@@ -110,12 +84,31 @@ func NewClusterManager(name string) (*ClusterManager, error) {
 		return nil, err
 	}
 	cluster.defaultIg = ig
-	bg, err := cluster.Backend(defaultPort)
+	cluster.backendPool = NewBackendPool(&cluster)
+	bg, err := cluster.backendPool.create(
+		ig, &compute.NamedPort{Port: defaultPort, Name: "default"},
+		fmt.Sprintf("%v-%v", backendPrefix, "default"))
 	if err != nil {
 		return nil, err
 	}
 	cluster.defaultBackend = bg
 	return &cluster, nil
+}
+
+func (c *ClusterManager) AddBackend(port int64) error {
+	return c.backendPool.Add(port)
+}
+
+func (c *ClusterManager) GetBackend(port int64) (*compute.BackendService, error) {
+	return c.backendPool.Get(port)
+}
+
+func (c *ClusterManager) DeleteBackend(port int64) error {
+	return c.backendPool.Delete(port)
+}
+
+func (c *ClusterManager) SyncBackends(ports []int64) error {
+	return c.backendPool.Sync(ports)
 }
 
 func (c *ClusterManager) AddNodes(nodeNames []string) error {
@@ -142,22 +135,6 @@ func (c *ClusterManager) GetNodes() (util.StringSet, error) {
 		nodeNames.Insert(parts[len(parts)-1])
 	}
 	return nodeNames, nil
-}
-
-func (c *ClusterManager) Cleanup() error {
-	if c.defaultBackend != nil {
-		if err := c.DeleteBackend(c.defaultBackend); err != nil {
-			return err
-		}
-		c.defaultBackend = nil
-	}
-	if c.defaultIg != nil {
-		if err := c.cloud.DeleteInstanceGroup(c.defaultIg.Name); err != nil {
-			return err
-		}
-		c.defaultIg = nil
-	}
-	return nil
 }
 
 func (c *ClusterManager) instanceGroup() (*compute.InstanceGroup, error) {
@@ -239,23 +216,31 @@ func (l *L7) proxy() *L7 {
 		l.Errors = append(l.Errors, fmt.Errorf("Cannot create proxy without urlmap."))
 		return l
 	}
-
 	proxyName := fmt.Sprintf("%v-%v", targetProxyPrefix, l.LbName)
 	proxy, err := l.cloud.GetProxy(proxyName)
-	if proxy != nil {
+	if proxy == nil || err != nil {
+		glog.Infof("Creating new http proxy for urlmap %v", l.um.Name)
+		proxy, err = l.cloud.CreateProxy(l.um, proxyName)
+		if err != nil {
+			l.Errors = append(l.Errors, err)
+		} else {
+			l.tp = proxy
+		}
+		return l
+	}
+	if compareSelfLinks(proxy.UrlMap, l.um.SelfLink) {
 		glog.Infof("Proxy %v already exists", proxy.Name)
 		l.tp = proxy
 		return l
 	}
-
-	glog.Infof("Creating new http proxy for urlmap %v", l.um.Name)
-	proxy, err = l.cloud.CreateProxy(l.um, proxyName)
-	if err != nil {
+	glog.Infof("Proxy %v has the wrong url map, setting %v overwriting %v", proxy.Name, l.um, proxy.UrlMap)
+	if err := l.cloud.SetUrlMapForProxy(proxy, l.um); err != nil {
 		l.Errors = append(l.Errors, err)
 	} else {
 		l.tp = proxy
 	}
 	return l
+
 }
 
 func (l *L7) forwardingRule() *L7 {
@@ -266,15 +251,24 @@ func (l *L7) forwardingRule() *L7 {
 
 	forwardingRuleName := fmt.Sprintf("%v-%v", forwardingRulePrefix, l.LbName)
 	fw, err := l.cloud.GetGlobalForwardingRule(forwardingRuleName)
-	if fw != nil {
+	if fw == nil || err != nil {
+		glog.Infof("Creating forwarding rule for proxy %v", l.tp.Name)
+		fw, err = l.cloud.CreateGlobalForwardingRule(l.tp, forwardingRuleName, defaultPortRange)
+		if err != nil {
+			l.Errors = append(l.Errors, err)
+		} else {
+			l.fw = fw
+		}
+		return l
+	}
+	// TODO: If the port range and protocol don't match, recreate the rule
+	if compareSelfLinks(fw.Target, l.tp.SelfLink) {
 		glog.Infof("Forwarding rule %v already exists", fw.Name)
 		l.fw = fw
 		return l
 	}
-
-	glog.Infof("Creating forwarding rule for proxy %v", l.tp.Name)
-	fw, err = l.cloud.CreateGlobalForwardingRule(l.tp, forwardingRuleName)
-	if err != nil {
+	glog.Infof("Forwarding rule %v has the wrong proxy, setting %v overwriting %v", fw.Name, fw.Target, l.tp.SelfLink)
+	if err := l.cloud.SetProxyForGlobalForwardingRule(fw, l.tp); err != nil {
 		l.Errors = append(l.Errors, err)
 	} else {
 		l.fw = fw
@@ -425,32 +419,36 @@ func RunTestServer(c *ClusterManager, lbName string) {
 		subdomainToUrlMap := map[string]map[string]int64{}
 		err := decoder.Decode(&subdomainToUrlMap)
 		if err != nil {
-			glog.Infof("Failed to decode urlmap %v", err)
-			return
+			glog.Fatalf("Failed to decode urlmap %v", err)
 		}
 		eventType := req.URL.Query().Get("type")
 
-		// Map ports to existing backends. If a backend doesn't exist, create it.
-		// This is literally the code in the controller, except for the backend creation.
+		// Create required backends
+		svcNodePorts := []int64{}
+		for _, urlMap := range subdomainToUrlMap {
+			for _, port := range urlMap {
+				svcNodePorts = append(svcNodePorts, port)
+			}
+		}
+		c.SyncBackends(svcNodePorts)
+
+		// Convert path map to backend map
 		subdomainToUrlBackend := map[string]map[string]*compute.BackendService{}
-		backends := []*compute.BackendService{}
 		for subdomain, urlMap := range subdomainToUrlMap {
 			urlToBackend := map[string]*compute.BackendService{}
-			for endpoint, port := range urlMap {
-				bg, err := c.Backend(port)
+			for path, port := range urlMap {
+				bg, err := c.GetBackend(port)
 				if err != nil {
-					glog.Infof("Could not get backend for port %v: %v. Ignoring endpoint %v.",
-						port, err, endpoint)
-					continue
+					glog.Fatalf("Failed to get backend for %v", port)
 				}
-				urlToBackend[endpoint] = bg
-				backends = append(backends, bg)
+				urlToBackend[path] = bg
 			}
 			subdomainToUrlBackend[subdomain] = urlToBackend
 		}
+
 		glog.Infof("Processing update for urlmap %+v", subdomainToUrlMap)
 		if err := l.UpdateUrlMap(subdomainToUrlBackend); err != nil {
-			glog.Infof("Failed to add urlmap %v", err)
+			glog.Fatalf("Failed to add urlmap %v", err)
 		} else {
 			glog.Infof("Updated %v with urlmap", l.fw.IPAddress)
 		}
@@ -460,14 +458,14 @@ func RunTestServer(c *ClusterManager, lbName string) {
 		}
 		glog.Infof("Deleting loadbalancer %v", l.LbName)
 		if err := l.Cleanup(); err != nil {
-			glog.Infof("Failed to cleanup loadbalancer resources: %v", err)
+			glog.Fatalf("Failed to cleanup loadbalancer resources: %v", err)
 		}
 		glog.Infof("Deleted private loadbalancer resources")
-		for _, bg := range backends {
+		for _, bg := range svcNodePorts {
 			if err := c.DeleteBackend(bg); err != nil {
-				glog.Infof("Failed to delete backend %v", err)
+				glog.Fatalf("Failed to delete backend %v", err)
 			}
-			glog.Infof("Deleted backend %v", bg.Name)
+			glog.Infof("Deleted backend for port %v", bg)
 		}
 	})
 	glog.Infof("Listening on 8082 for urlmap")
@@ -476,4 +474,10 @@ func RunTestServer(c *ClusterManager, lbName string) {
 
 func bgName(port int64) string {
 	return fmt.Sprintf("%v-%v", backendPrefix, port)
+}
+
+// compareSelfLinks returns true if the 2 self links are equal.
+func compareSelfLinks(l1, l2 string) bool {
+	// TODO: These can be partial links
+	return l1 == l2
 }

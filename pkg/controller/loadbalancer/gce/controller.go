@@ -190,42 +190,19 @@ func (lbc *loadBalancerController) Run() {
 
 // syncBackends deletes GCE backends without any paths, and creates backends for new paths.
 func (lbc *loadBalancerController) syncBackends() error {
-	glog.Infof("Syncing backends")
 	paths, err := lbc.pmLister.List()
 	if err != nil {
 		return err
 	}
-	// gc backends without a path
-	for port, backend := range lbc.backends {
-		if len(getPathsToNodePort(paths, port)) == 0 {
-			glog.Infof("No paths found for port %v, deleting backend %v", port, backend.Name)
-		}
-		if err := lbc.clusterManager.DeleteBackend(backend); err != nil {
-			return err
-		}
-		glog.Infof("Deleted backend %v", backend.Name)
-	}
-	// Create backends with a new path. Though this is stored as a nested struct all we need
-	// is a flat list of nodePorts for backends.
+	knownPorts := []int64{}
 	for _, pm := range paths.Items {
 		for _, subdomainToUrlMap := range pm.Spec.PathMap {
 			for _, svcRef := range subdomainToUrlMap {
-				port := svcRef.Port.NodePort
-				if _, ok := lbc.backends[port]; !ok && port != 0 {
-					if lbc.clusterManager == nil {
-						glog.Infof("In test mode, would've created backend for port %v", port)
-						continue
-					}
-					backend, err := lbc.clusterManager.Backend(int64(port))
-					if err != nil {
-						return err
-					}
-					lbc.backends[port] = backend
-				}
+				knownPorts = append(knownPorts, int64(svcRef.Port.NodePort))
 			}
 		}
 	}
-	return nil
+	return lbc.clusterManager.SyncBackends(knownPorts)
 }
 
 // syncPathMap updates gce's urlmap according to the kubernetes pathmap.
