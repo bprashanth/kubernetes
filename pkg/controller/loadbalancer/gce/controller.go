@@ -19,7 +19,6 @@ package lb
 import (
 	"fmt"
 	"reflect"
-	"strings"
 	"time"
 
 	compute "google.golang.org/api/compute/v1"
@@ -65,6 +64,11 @@ func (t *taskQueue) enqueue(obj interface{}) {
 	t.queue.Add(key)
 }
 
+func (t *taskQueue) requeue(key string, err error) {
+	glog.Infof("Requeuing %v, err %v", key, err)
+	t.queue.Add(key)
+}
+
 // worker processes work in the queue through sync.
 func (t *taskQueue) worker() {
 	for {
@@ -93,8 +97,6 @@ type loadBalancerController struct {
 	pmLister       cache.StoreToPathMapLister
 	nodeLister     cache.StoreToNodeLister
 	clusterManager *ClusterManager
-	loadBalancers  map[string]*L7
-	backends       map[int]*compute.BackendService
 	recorder       record.EventRecorder
 	nodeQueue      *taskQueue
 	pmQueue        *taskQueue
@@ -108,7 +110,9 @@ func NewLoadBalancerController(kubeClient *client.Client, createClusterManager b
 		if err != nil {
 			return nil, err
 		}
-		glog.Infof("Creating loadbalancer cluster manager %v with nodes %v", lbControllerName, nodes)
+		glog.Infof(
+			"Creating loadbalancer cluster manager %v with nodes %v",
+			lbControllerName, nodes)
 		clusterManager, err = NewClusterManager(lbControllerName)
 		if err != nil {
 			return nil, err
@@ -123,10 +127,9 @@ func NewLoadBalancerController(kubeClient *client.Client, createClusterManager b
 
 	lbc := loadBalancerController{
 		client:         kubeClient,
-		loadBalancers:  map[string]*L7{},
-		backends:       map[int]*compute.BackendService{},
 		clusterManager: clusterManager,
-		recorder:       eventBroadcaster.NewRecorder(api.EventSource{Component: "loadbalancer-controller"}),
+		recorder: eventBroadcaster.NewRecorder(
+			api.EventSource{Component: "loadbalancer-controller"}),
 	}
 	lbc.nodeQueue = NewTaskQueue(lbc.syncNodes)
 	lbc.pmQueue = NewTaskQueue(lbc.sync)
@@ -188,12 +191,42 @@ func (lbc *loadBalancerController) Run() {
 	lbc.nodeQueue.run(time.Second, util.NeverStop)
 }
 
-// syncBackends deletes GCE backends without any paths, and creates backends for new paths.
-func (lbc *loadBalancerController) syncBackends() error {
+func (lbc *loadBalancerController) getCloudUrlMap(pm *api.PathMap) (map[string]map[string]*compute.BackendService, error) {
+	subdomainUrlBackend := map[string]map[string]*compute.BackendService{}
+	for subdomain, urlMap := range pm.Spec.PathMap {
+		urlToBackend := map[string]*compute.BackendService{}
+		for endpoint, svcRef := range urlMap {
+			port := svcRef.Port.NodePort
+			if port == 0 {
+				continue
+			}
+			backend, err := lbc.clusterManager.GetBackend(int64(port))
+			if err != nil {
+				return map[string]map[string]*compute.BackendService{},
+					fmt.Errorf("No backend for pathmap %v, port %v", pm.Name, port)
+			}
+			urlToBackend[endpoint] = backend
+		}
+		subdomainUrlBackend[subdomain] = urlToBackend
+	}
+	return subdomainUrlBackend, nil
+}
+
+// sync manages the syncing of backends and pathmaps.
+func (lbc *loadBalancerController) sync(key string) {
+	glog.Infof("Syncing loadbalancer %v", key)
+
 	paths, err := lbc.pmLister.List()
 	if err != nil {
-		return err
+		lbc.pmQueue.requeue(key, err)
+		return
 	}
+
+	if err := lbc.clusterManager.SyncL7s(lbc.pmLister.Store.ListKeys()); err != nil {
+		lbc.pmQueue.requeue(key, err)
+		return
+	}
+
 	knownPorts := []int64{}
 	for _, pm := range paths.Items {
 		for _, subdomainToUrlMap := range pm.Spec.PathMap {
@@ -202,115 +235,33 @@ func (lbc *loadBalancerController) syncBackends() error {
 			}
 		}
 	}
-	return lbc.clusterManager.SyncBackends(knownPorts)
-}
-
-// syncPathMap updates gce's urlmap according to the kubernetes pathmap.
-// This method assumes the appropriate backends already exist.
-func (lbc *loadBalancerController) syncPathMap(pm api.PathMap) error {
-
-	// Convert the pathmap from a subdomain: {path: kubernetes service} mapping
-	// to a subdomain: {path: gce backend for kubernetes service} mapping.
-	subdomainToUrlBackend := map[string]map[string]*compute.BackendService{}
-	for subdomain, urlMap := range pm.Spec.PathMap {
-		urlToBackend := map[string]*compute.BackendService{}
-		for endpoint, svcRef := range urlMap {
-			port := svcRef.Port.NodePort
-			if port == 0 {
-				glog.Errorf("Ignoring path map %v, service %v doesn't have nodePort",
-					pm.Name, svcRef.Service.Name)
-				continue
-			}
-			if portBackend, ok := lbc.backends[port]; !ok {
-				return fmt.Errorf("No backend for pathmap %v, port %v", pm.Name, port)
-			} else {
-				urlToBackend[endpoint] = portBackend
-			}
-		}
-		subdomainToUrlBackend[subdomain] = urlToBackend
+	if err := lbc.clusterManager.SyncBackends(knownPorts); err != nil {
+		lbc.pmQueue.requeue(key, err)
+		return
 	}
-
-	// Get the loadbalancer for the given pathmap and update its urls.
-	key, err := keyFunc(&pm)
-	if err != nil {
-		return err
-	}
-	l, lbExists := lbc.loadBalancers[key]
-	if !lbExists {
-		l = lbc.clusterManager.NewL7(pm.Name)
-		if len(l.Errors) != 0 {
-			return fmt.Errorf("%+v", l.Errors)
-		} else {
-			lbc.loadBalancers[key] = l
-		}
-		lbc.recorder.Eventf(&pm, "Created", "Created loadbalancer: %v", l.GetIP())
-	}
-	if err := l.UpdateUrlMap(subdomainToUrlBackend); err != nil {
-		return err
-	}
-
-	paths := []string{}
-	for subdomain, urlToBackend := range subdomainToUrlBackend {
-		for path, _ := range urlToBackend {
-			paths = append(paths, path)
-		}
-		lbc.recorder.Eventf(&pm, "Updated",
-			"Updated loadbalancer: %v subdomain %v with paths: %v",
-			l.GetIP(), subdomain, strings.Join(paths, ","))
-	}
-	return nil
-}
-
-// sync manages the syncing of backends and pathmaps.
-func (lbc *loadBalancerController) sync(key string) {
 	obj, pmExists, err := lbc.pmLister.Store.GetByKey(key)
 	if err != nil {
-		glog.Errorf("requeuing %v: %v", key, err)
-		// TODO: don't break the enqueue abstraction
-		lbc.pmQueue.queue.Add(key)
+		lbc.pmQueue.requeue(key, err)
 		return
 	}
-
-	// Cleaning cluster resources of deleted pathmaps involves
-	// deleting forwarding rules, proxies and urlmaps but not
-	// backends. Backends are freed when no pathmaps reference
-	// them, in syncBackends.
 	if !pmExists {
-		glog.Infof("Pathmap %v deleted", key)
-		l, lbExists := lbc.loadBalancers[key]
-		if !lbExists {
-			glog.Infof("Pathmap %v doesn't have loadbalancer", key)
-		} else if err := l.Cleanup(); err != nil {
-			glog.Errorf("requeuing %v: %v", key, err)
-			lbc.pmQueue.queue.Add(key)
-			return
-		}
-		delete(lbc.loadBalancers, key)
-	}
-
-	// Backends are shared across loadbalancers for efficiency. Syncing of
-	// backends should happen after deleting cluster resources of deleted
-	// pathmaps (because the reference graph is private loadbalancer
-	// resources -> backends -> instance group), but before we create
-	// cluster resources for new pathmaps.
-	if err := lbc.syncBackends(); err != nil {
-		glog.Errorf("requeuing %v: %v", key, err)
-		lbc.pmQueue.enqueue(obj)
 		return
 	}
-	if lbc.clusterManager == nil || !pmExists {
+	l7, err := lbc.clusterManager.GetL7(key)
+	if err != nil {
+		lbc.pmQueue.requeue(key, err)
 		return
 	}
 
-	// Pathmap syncing involves updating the urlmap associated with a
-	// forwarding rule for a loadbalancer, with the backends created
-	// in syncBackends.
-	if err := lbc.syncPathMap(*obj.(*api.PathMap)); err != nil {
-		glog.Errorf("requeuing %v: %v", key, err)
-		lbc.pmQueue.enqueue(obj)
-		return
+	pm := *obj.(*api.PathMap)
+	if urlMap, err := lbc.getCloudUrlMap(&pm); err != nil {
+		lbc.pmQueue.requeue(key, err)
+	} else if err := l7.UpdateUrlMap(urlMap); err != nil {
+		lbc.pmQueue.requeue(key, err)
+	} else {
+		glog.Infof("Finished syncing %v", key)
 	}
-	glog.Infof("Finished syncing %v", key)
+	return
 }
 
 // syncNodes manages the syncing of kubernetes nodes to gce instance groups.
