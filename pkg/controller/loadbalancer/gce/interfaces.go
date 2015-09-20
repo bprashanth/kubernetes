@@ -26,11 +26,11 @@ type NodePool interface {
 	Add(nodeNames []string) error
 	Remove(nodeNames []string) error
 	Sync(nodeNames []string) error
-	// TODO: Get leaks the cloud abstraction.
+	// TODO: Getters leaks the cloud abstraction.
 	Get(name string) (*compute.InstanceGroup, error)
 }
 
-// InstanceGroups is an abstract interface for managing gce instances groups, and the instances therein.
+// InstanceGroups is an interface for managing gce instances groups, and the instances therein.
 type InstanceGroups interface {
 	GetInstanceGroup(name string) (*compute.InstanceGroup, error)
 	CreateInstanceGroup(name string) (*compute.InstanceGroup, error)
@@ -41,4 +41,21 @@ type InstanceGroups interface {
 	AddInstancesToInstanceGroup(name string, instanceNames []string) error
 	RemoveInstancesFromInstanceGroup(name string, instanceName []string) error
 	AddPortToInstanceGroup(ig *compute.InstanceGroup, port int64) (*compute.NamedPort, error)
+}
+
+// BackendPool is an interface to manage a pool of kubernetes nodePort services
+// as gce backendServices, and sync them through the BackendServices interface.
+type BackendPool interface {
+	Add(port int64) error
+	Get(port int64) (*compute.BackendService, error)
+	Delete(port int64) error
+	Sync(ports []int64) error
+}
+
+// BackendServices is an interface for managing gce backend services.
+type BackendServices interface {
+	GetBackendService(name string) (*compute.BackendService, error)
+	UpdateBackendService(bg *compute.BackendService) error
+	CreateBackendService(bg *compute.BackendService) error
+	DeleteBackendService(name string) error
 }

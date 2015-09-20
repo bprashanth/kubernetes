@@ -99,7 +99,7 @@ func (f *fakeInstanceGroups) RemoveInstancesFromInstanceGroup(name string, insta
 
 func (f *fakeInstanceGroups) AddPortToInstanceGroup(ig *compute.InstanceGroup, port int64) (*compute.NamedPort, error) {
 	f.ports = append(f.ports, port)
-	return &compute.NamedPort{Name: bgName(port), Port: port}, nil
+	return &compute.NamedPort{Name: beName(port), Port: port}, nil
 }
 
 func newFakeInstanceGroups(nodes sets.String) *fakeInstanceGroups {
@@ -169,7 +169,7 @@ func TestNodePoolSync(t *testing.T) {
 
 	// KubeNodes: n1, n2
 	// GCENodes: n1
-	// Try to add n2 to the instance group. If n2 doesn't exist this will fail.
+	// Try to add n2 to the instance group.
 
 	f = newFakeInstanceGroups(sets.NewString([]string{"n1"}...))
 	pool = newNodePool(f, defaultIgName, t)

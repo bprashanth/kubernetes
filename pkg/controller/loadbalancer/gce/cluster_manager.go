@@ -19,6 +19,7 @@ package lb
 import (
 	"fmt"
 
+	compute "google.golang.org/api/compute/v1"
 	gce "k8s.io/kubernetes/pkg/cloudprovider/providers/gce"
 )
 
@@ -30,6 +31,10 @@ const (
 	// A single instance-group is created per cluster manager.
 	// Tagged with the name of the controller.
 	instanceGroupPrefix = "k8-ig"
+
+	// A backend is created per nodePort, tagged with the nodeport.
+	// This allows sharing of backends across loadbalancers.
+	backendPrefix = "k8-bg"
 
 	// The gce api uses the name of a path rule to match a host rule.
 	// In the current implementation,
@@ -47,6 +52,7 @@ type ClusterManager struct {
 	ClusterName  string
 	cloud        *gce.GCECloud
 	instancePool NodePool
+	backendPool  BackendPool
 }
 
 // NewClusterManager creates a cluster manager for shared resources.
@@ -59,8 +65,43 @@ func NewClusterManager(name string) (*ClusterManager, error) {
 		ClusterName: name,
 		cloud:       cloud,
 	}
+
+	// Why do we need so many defaults?
+	// Default IG: We add all instances to a single ig, and
+	// every service that requires loadbalancing opens up
+	// a nodePort on the cluster, which translates to a node
+	// on this default ig.
+	//
+	// Default Backend: We need a default backend to create
+	// every urlmap, even if the user doesn't specify one.
+	// This is the backend that gets requests if no paths match.
+	// Note that this backend doesn't actually occupy a port
+	// on the instance group.
+	//
+	// Default Health Check: Needs investigation. Currently
+	// we just plug something in there for the api.
+
+	defaultIgName := fmt.Sprintf("%v-%v", instanceGroupPrefix, name)
 	cluster.instancePool, err = NewNodePool(
-		cloud, fmt.Sprintf("%v-%v", instanceGroupPrefix, name))
+		cloud, defaultIgName)
+	if err != nil {
+		return nil, err
+	}
+	// TODO: We're roud tripping for a resource we just created.
+	defaultIg, err := cluster.instancePool.Get(defaultIgName)
+	if err != nil {
+		return nil, err
+	}
+	defaultHc, err := cloud.GetHttpHealthCheck(defaultHttpHealthCheck)
+	if err != nil {
+		return nil, err
+	}
+	cluster.backendPool, err = NewBackendPool(
+		cloud,
+		fmt.Sprintf("%v-%v", backendPrefix, "default"),
+		defaultIg,
+		defaultHc,
+		cloud)
 	if err != nil {
 		return nil, err
 	}
@@ -77,4 +118,20 @@ func (c *ClusterManager) RemoveNodes(nodeNames []string) error {
 
 func (c *ClusterManager) SyncNodes(nodeNames []string) error {
 	return c.instancePool.Sync(nodeNames)
+}
+
+func (c *ClusterManager) AddBackend(port int64) error {
+	return c.backendPool.Add(port)
+}
+
+func (c *ClusterManager) GetBackend(port int64) (*compute.BackendService, error) {
+	return c.backendPool.Get(port)
+}
+
+func (c *ClusterManager) DeleteBackend(port int64) error {
+	return c.backendPool.Delete(port)
+}
+
+func (c *ClusterManager) SyncBackends(ports []int64) error {
+	return c.backendPool.Sync(ports)
 }
