@@ -59,3 +59,37 @@ type BackendServices interface {
 	CreateBackendService(bg *compute.BackendService) error
 	DeleteBackendService(name string) error
 }
+
+// LoadBalancers is an interface for managing all the gce resources needed by L7
+// loadbalancers. We don't have individual pools for each of these resources
+// because none of them are usable (or acquirable) stand-alone, unlinke backends
+// and instance groups. The dependency graph:
+// ForwardingRule -> UrlMaps -> TargetProxies
+type LoadBalancers interface {
+	// Forwarding Rules
+	GetGlobalForwardingRule(name string) (*compute.ForwardingRule, error)
+	CreateGlobalForwardingRule(proxy *compute.TargetHttpProxy, name string, portRange string) (*compute.ForwardingRule, error)
+	DeleteGlobalForwardingRule(name string) error
+	SetProxyForGlobalForwardingRule(fw *compute.ForwardingRule, proxy *compute.TargetHttpProxy) error
+
+	// UrlMaps
+	GetUrlMap(name string) (*compute.UrlMap, error)
+	CreateUrlMap(backend *compute.BackendService, name string) (*compute.UrlMap, error)
+	UpdateUrlMap(urlMap *compute.UrlMap) (*compute.UrlMap, error)
+	DeleteUrlMap(name string) error
+
+	// TargetProxies
+	GetTargetHttpProxy(name string) (*compute.TargetHttpProxy, error)
+	CreateTargetHttpProxy(urlMap *compute.UrlMap, name string) (*compute.TargetHttpProxy, error)
+	DeleteTargetHttpProxy(name string) error
+	SetUrlMapForTargetHttpProxy(proxy *compute.TargetHttpProxy, urlMap *compute.UrlMap) error
+}
+
+// LoadBalancerPool is an interface to manage the cloud resources associated
+// with a gce loadbalancer.
+type LoadBalancerPool interface {
+	Get(name string) (*L7, error)
+	Add(name string) error
+	Delete(name string) error
+	Sync(names []string) error
+}

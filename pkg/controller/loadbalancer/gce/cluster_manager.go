@@ -34,7 +34,14 @@ const (
 
 	// A backend is created per nodePort, tagged with the nodeport.
 	// This allows sharing of backends across loadbalancers.
-	backendPrefix = "k8-bg"
+	backendPrefix      = "k8-be"
+	defaultBackendName = "k8-be-default"
+
+	// A single target proxy/urlmap/forwarding rule is created per loadbalancer.
+	// Tagged with the name of the IngressPoint.
+	targetProxyPrefix    = "k8-tp"
+	forwardingRulePrefix = "k8-fw"
+	urlMapPrefix         = "k8-um"
 
 	// The gce api uses the name of a path rule to match a host rule.
 	// In the current implementation,
@@ -53,6 +60,7 @@ type ClusterManager struct {
 	cloud        *gce.GCECloud
 	instancePool NodePool
 	backendPool  BackendPool
+	l7Pool       LoadBalancerPool
 }
 
 // NewClusterManager creates a cluster manager for shared resources.
@@ -98,13 +106,17 @@ func NewClusterManager(name string) (*ClusterManager, error) {
 	}
 	cluster.backendPool, err = NewBackendPool(
 		cloud,
-		fmt.Sprintf("%v-%v", backendPrefix, "default"),
+		defaultBeName,
 		defaultIg,
 		defaultHc,
 		cloud)
 	if err != nil {
 		return nil, err
 	}
+	// TODO: Don't cast, the problem here is the default backend doesn't have
+	// a port and the interface only allows backend access via port.
+	cluster.l7Pool = NewLoadBalancerPool(
+		cloud, cluster.backendPool.(*Backends).defaultBackend)
 	return &cluster, nil
 }
 
@@ -134,4 +146,20 @@ func (c *ClusterManager) DeleteBackend(port int64) error {
 
 func (c *ClusterManager) SyncBackends(ports []int64) error {
 	return c.backendPool.Sync(ports)
+}
+
+func (c *ClusterManager) AddL7(name string) error {
+	return c.l7Pool.Add(name)
+}
+
+func (c *ClusterManager) GetL7(name string) (*L7, error) {
+	return c.l7Pool.Get(name)
+}
+
+func (c *ClusterManager) DeleteL7(name string) error {
+	return c.l7Pool.Delete(name)
+}
+
+func (c *ClusterManager) SyncL7s(names []string) error {
+	return c.l7Pool.Sync(names)
 }
