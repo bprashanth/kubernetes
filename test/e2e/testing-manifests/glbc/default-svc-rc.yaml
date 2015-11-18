@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: ReplicationController
+metadata:
+  name: default-backend
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: default-backend
+    spec:
+      containers:
+      - name: default-backend
+        image: gcr.io/google_containers/netexec:1.1
+        ports:
+        - containerPort: 8080
+

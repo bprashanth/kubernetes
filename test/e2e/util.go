@@ -2338,3 +2338,65 @@ func waitForIngressAddress(c *client.Client, ns, ingName string, timeout time.Du
 	})
 	return address, err
 }
+
+// getSvcNodePort returns the node port for the given service:port.
+func getSvcNodePort(client *client.Client, ns, name string, svcPort int) (int, error) {
+	svc, err := client.Services(ns).Get(name)
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range svc.Spec.Ports {
+		if p.Port == svcPort {
+			if p.NodePort != 0 {
+				return p.NodePort, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf(
+		"No node port found for service %v, port %v", name, svcPort)
+}
+
+// getReadyEndpoints returns a list of Ready Service Endpoints.
+func getReadyEndpoints(c *client.Client, svcNs, svcName string) ([]string, error) {
+	readyEp := []string{}
+	eps, err := c.Endpoints(svcNs).Get(svcName)
+	if err != nil {
+		return readyEp, err
+	}
+	Logf("Looking for ready endpoints of Service %v", svcName)
+	for _, ss := range eps.Subsets {
+		Logf("Subsets of Service %v: %v", svcName, ss)
+		for _, a := range ss.Addresses {
+			readyEp = append(readyEp, a.IP)
+		}
+	}
+	return readyEp, nil
+}
+
+// getPodNodeIPs returns a list of node IPs on which pods matching the labels are
+// running. Generally used in conjunction with HostPort to trigger things like
+// liveness/readiness failure directly on an endpoint, because that makes the
+// endpoint unavailable through the Service.
+// - ns is the namespace under which to list pods.
+// - l are the labels to match against. Usually that of an RC or Service.
+func getPodNodeIPs(c *client.Client, ns string, l map[string]string) ([]string, error) {
+	labelSelector := labels.SelectorFromSet(labels.Set(l))
+	addresses := []string{}
+	pods, err := c.Pods(ns).List(labelSelector, fields.Everything())
+	if err != nil {
+		return addresses, err
+	}
+	for _, p := range pods.Items {
+		Logf("looking for node address of pod %v", p.Name)
+		wait.Poll(pollInterval, serviceRespondingTimeout, func() (bool, error) {
+			address, err := getHostExternalAddress(c, &p)
+			if err != nil {
+				Logf("%v", err)
+				return false, nil
+			}
+			addresses = append(addresses, address)
+			return true, nil
+		})
+	}
+	return addresses, nil
+}

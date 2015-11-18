@@ -1,0 +1,29 @@
+# This is the Ingress resource that creates a HTTP Loadbalancer configured
+# according to the Ingress rules.
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: nginx-test-ingress
+spec:
+  # Backend responsible for the 404 page.
+  # Currently the Ingress controller is responsible for starting this backend.
+  # See testing-manifests/glbc for an example.
+  backend:
+    serviceName: default-backend
+    servicePort: 80
+  rules:
+  - host: foobar
+    http:
+      paths:
+      - path: /hostname
+        backend:
+          serviceName: nginx-test
+          servicePort: 80
+  - host: bar
+    http:
+      paths:
+      - path: /echo/*
+        backend:
+          serviceName: nginx-test
+          servicePort: 80
+
