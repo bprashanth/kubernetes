@@ -30,14 +30,31 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
 var (
-	httpPort  = 8080
-	udpPort   = 8081
-	shellPath = "/bin/sh"
+	httpPort    = 8080
+	udpPort     = 8081
+	shellPath   = "/bin/sh"
+	serverReady = &atomicBool{0}
 )
+
+// atomicBool uses load/store operations on an int32 to simulate an atomic boolean.
+type atomicBool struct {
+	v int32
+}
+
+// set sets the int32 to 1
+func (a *atomicBool) set() {
+	atomic.StoreInt32(&a.v, 1)
+}
+
+// get returns true if the int32 == 1
+func (a *atomicBool) get() bool {
+	return atomic.LoadInt32(&a.v) == 1
+}
 
 type output struct {
 	responses []string
@@ -61,7 +78,17 @@ func startHTTPServer(httpPort int) {
 	http.HandleFunc("/shell", shellHandler)
 	http.HandleFunc("/upload", uploadHandler)
 	http.HandleFunc("/dial", dialHandler)
+	http.HandleFunc("/healthz", healthzHandler)
 	log.Fatal(http.ListenAndServe(fmt.Sprintf(":%d", httpPort), nil))
+}
+
+// healthHandler response with a 200 if the UDP server is ready.
+func healthzHandler(w http.ResponseWriter, r *http.Request) {
+	if serverReady.get() {
+		w.WriteHeader(200)
+		return
+	}
+	w.WriteHeader(http.StatusPreconditionFailed)
 }
 
 func shutdownHandler(w http.ResponseWriter, r *http.Request) {
@@ -283,6 +310,9 @@ func startUDPServer(udpPort int) {
 	defer serverConn.Close()
 	buf := make([]byte, 1024)
 
+	log.Printf("Started udp server")
+	// Start responding to readiness probes with a 200.
+	serverReady.set()
 	for {
 		n, clientAddress, err := serverConn.ReadFromUDP(buf)
 		assertNoError(err)

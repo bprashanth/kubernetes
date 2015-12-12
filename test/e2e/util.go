@@ -688,7 +688,20 @@ func waitTimeoutForPodRunningInNamespace(c *client.Client, podName string, names
 		if pod.Status.Phase == api.PodFailed {
 			return true, fmt.Errorf("Giving up; pod went into failed status: \n%s", spew.Sprintf("%#v", pod))
 		}
-		return false, nil
+		return podReady(pod), nil
+	})
+}
+
+func waitTimeoutForPodReadyInNamespace(c *client.Client, podName string, namespace string, timeout time.Duration) error {
+	return waitForPodCondition(c, namespace, podName, "running", timeout, func(pod *api.Pod) (bool, error) {
+		if pod.Status.Phase == api.PodRunning {
+			Logf("Found pod '%s' on node '%s'", podName, pod.Spec.NodeName)
+			return true, nil
+		}
+		if pod.Status.Phase == api.PodFailed {
+			return true, fmt.Errorf("Giving up; pod went into failed status: \n%s", spew.Sprintf("%#v", pod))
+		}
+		return podReady(pod), nil
 	})
 }
 

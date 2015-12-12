@@ -11,3 +11,11 @@ spec:
     ports:
     - containerPort: 8080
     - containerPort: 8081
+    readinessProbe:
+      httpGet:
+        path: /healthz
+        port: 8081
+          scheme: HTTP
+        initialDelaySeconds: 10
+        timeoutSeconds: 5
+
