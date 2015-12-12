@@ -53,6 +53,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/envvars"
 	"k8s.io/kubernetes/pkg/kubelet/metrics"
 	"k8s.io/kubernetes/pkg/kubelet/network"
+	"k8s.io/kubernetes/pkg/kubelet/network/cni"
 	"k8s.io/kubernetes/pkg/kubelet/pleg"
 	kubepod "k8s.io/kubernetes/pkg/kubelet/pod"
 	"k8s.io/kubernetes/pkg/kubelet/prober"
@@ -343,11 +344,23 @@ func NewMainKubelet(
 		// even if the network changes. We only need it for the master proxy.
 		klet.flannelExperimentalOverlay = false
 	}
+	// TODO: remove this hack. The problem is as follows:
+	// We install all CNI plugins on a node. We allow users to pick a specific
+	// plugin by setting --network-plugin-name to net.alpha.kubernetes.io/specific-plugin.
+	// However *all* cni plugins only report a name of "cni". So we save the
+	// passed in plugin name, get a lazy loader for the CNI plugin, and use the
+	// saved name to write a net.conf after we've acquired a podCIDR.
+	klet.networkPluginName = networkPluginName
+	if network.GetPluginType(klet.networkPluginName) != "" {
+		glog.Infof("Creating CNI deferred loader for plugin %v.", klet.networkPluginName)
+		networkPluginName = network.CNIPluginName
+	}
 	if plug, err := network.InitNetworkPlugin(networkPlugins, networkPluginName, &networkHost{klet}); err != nil {
 		return nil, err
 	} else {
 		klet.networkPlugin = plug
 	}
+	glog.Infof("Kubelet network plugin %v", klet.networkPlugin.Name())
 
 	machineInfo, err := klet.GetCachedMachineInfo()
 	if err != nil {
@@ -669,6 +682,9 @@ type Kubelet struct {
 	// on the fly if we're confident the dbus connetions it opens doesn't
 	// put the system under duress.
 	flannelHelper *FlannelHelper
+
+	// Name of network plugin responsible for pod networking setup.
+	networkPluginName string
 }
 
 func (kl *Kubelet) allSourcesReady() bool {
@@ -911,7 +927,7 @@ func (kl *Kubelet) Run(updates <-chan kubetypes.PodUpdate) {
 		// Start syncing node status immediately, this may set up things the runtime needs to run.
 		go util.Until(kl.syncNodeStatus, kl.nodeStatusUpdateFrequency, util.NeverStop)
 	}
-	go util.Until(kl.syncNetworkStatus, 30*time.Second, util.NeverStop)
+	go util.Until(func() { kl.syncNetworkStatus(execerImpl{}) }, 30*time.Second, util.NeverStop)
 	go util.Until(kl.updateRuntimeUp, 5*time.Second, util.NeverStop)
 
 	// Start a goroutine responsible for killing pods (that are not properly
@@ -2645,31 +2661,65 @@ func (kl *Kubelet) recordNodeStatusEvent(eventtype, event string) {
 	kl.recorder.Eventf(kl.nodeRef, eventtype, event, "Node %s status is now: %s", kl.nodeName, event)
 }
 
-func (kl *Kubelet) syncNetworkStatus() {
+// syncNetworkStatus is responsible configuring networking as follows:
+// [Network state set to Unknown]
+// * If configureCBR0==false, the kubelet doesn't bother with node networking.
+// [Network state cleared]
+// * Configure IPTables masquerade rules for node traffic.
+// * Wait for podCIDR:
+//	- If flannelExperimentalOverlay is set, this requires waiting on subnet.env
+//	- Otherwise it requires waiting on the nodecontroller to assign a podCIDR
+// * Configure container bridge
+// - If --network-plugin-dir was set, and --network-plugin-name was set to
+//   network.kubernetesPluginPrefix/<type>, write out the configuration for
+//   plugin of <type>, and reload the plugin. The plugin is now responsible
+//   for configuring (or not configuring) the continer bridge.
+// - Otherwise, reconcile CBR0 and restart docker.
+// [Network state cleared]
+// The kubelet will not create static pods till the network state has been
+// cleared. It also won't accept new pods till it has updated the node to Ready.
+func (kl *Kubelet) syncNetworkStatus(execHelper execer) {
 	var err error
-	if kl.configureCBR0 {
-		if kl.flannelExperimentalOverlay {
-			podCIDR, err := kl.flannelHelper.Handshake()
-			if err != nil {
-				glog.Infof("Flannel server handshake failed %v", err)
-				return
-			}
-			glog.Infof("Setting cidr: %v -> %v",
-				kl.runtimeState.podCIDR(), podCIDR)
-			kl.runtimeState.setPodCIDR(podCIDR)
+	if !kl.configureCBR0 {
+		kl.runtimeState.setNetworkState(nil)
+		return
+	}
+	// TODO: Re-implment this as --network-plugin-name=flannel.
+	if kl.flannelExperimentalOverlay {
+		podCIDR, err := kl.flannelHelper.Handshake()
+		if err != nil {
+			kl.runtimeState.setNetworkState(fmt.Errorf("Flannel server handshake failed %v", err))
+			return
 		}
-		if err := ensureIPTablesMasqRule(); err != nil {
-			err = fmt.Errorf("Error on adding ip table rules: %v", err)
-			glog.Error(err)
-		}
-		podCIDR := kl.runtimeState.podCIDR()
-		if len(podCIDR) == 0 {
-			err = fmt.Errorf("ConfigureCBR0 requested, but PodCIDR not set. Will not configure CBR0 right now")
-			glog.Warning(err)
-		} else if err := kl.reconcileCBR0(podCIDR); err != nil {
-			err = fmt.Errorf("Error configuring cbr0: %v", err)
-			glog.Error(err)
-		}
+		glog.Infof("Setting cidr: %v -> %v",
+			kl.runtimeState.podCIDR(), podCIDR)
+		kl.runtimeState.setPodCIDR(podCIDR)
+	}
+	// TODO: Turn this into a plugin that we always invoke for every other
+	// Kubernets network plugin.
+	if err = ensureIPTablesMasqRule(execHelper); err != nil {
+		err = fmt.Errorf("Error on adding ip table rules: %v", err)
+		glog.Error(err)
+	}
+	podCIDR := kl.runtimeState.podCIDR()
+	if len(podCIDR) == 0 {
+		err = fmt.Errorf("ConfigureCBR0 requested, but PodCIDR not set. Will not configure CBR0 right now")
+		kl.runtimeState.setNetworkState(err)
+		glog.Warning(err)
+		return
+	}
+	// TODO: Break this out into a meta Kubernetes plugin that the Kubelet
+	// communicates with by passing CNI_ARG=PluginName=<name>.
+	switch network.GetPluginType(kl.networkPluginName) {
+	case network.BridgePluginName, network.KubeletDefaultPluginName:
+		// TODO: Bandwidth shaping currently does not work with plugins.
+		err = kl.networkPlugin.ReloadConf(&cni.BridgeNetConf{podCIDR})
+	default:
+		err = kl.reconcileCBR0(podCIDR)
+	}
+	if err != nil {
+		err = fmt.Errorf("Failed to configure networking")
+		glog.Warning(err)
 	}
 	kl.runtimeState.setNetworkState(err)
 }
