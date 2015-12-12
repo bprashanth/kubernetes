@@ -688,7 +688,7 @@ func waitTimeoutForPodRunningInNamespace(c *client.Client, podName string, names
 		if pod.Status.Phase == api.PodFailed {
 			return true, fmt.Errorf("Giving up; pod went into failed status: \n%s", spew.Sprintf("%#v", pod))
 		}
-		return podReady(pod), nil
+		return false, nil
 	})
 }
 
