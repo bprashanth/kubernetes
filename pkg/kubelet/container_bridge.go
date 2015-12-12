@@ -27,7 +27,24 @@ import (
 	"k8s.io/kubernetes/pkg/util"
 )
 
-var cidrRegexp = regexp.MustCompile(`inet ([0-9a-fA-F.:]*/[0-9]*)`)
+var (
+	iptablesMasqCheck = []string{
+		"-t", "nat",
+		"-C", "POSTROUTING",
+		"!", "-d", "10.0.0.0/8",
+		"-m", "addrtype", "!", "--dst-type", "LOCAL",
+		"-j", "MASQUERADE",
+	}
+	iptablesMasqAppend = []string{
+		"-t", "nat",
+		"-A", "POSTROUTING",
+		"!", "-d", "10.0.0.0/8",
+		"-m", "addrtype", "!", "--dst-type", "LOCAL",
+		"-j", "MASQUERADE",
+	}
+
+	cidrRegexp = regexp.MustCompile(`inet ([0-9a-fA-F.:]*/[0-9]*)`)
+)
 
 func createCBR0(wantCIDR *net.IPNet) error {
 	// recreate cbr0 with wantCIDR
@@ -119,25 +136,15 @@ func cbr0CidrCorrect(wantCIDR *net.IPNet) bool {
 }
 
 // TODO(dawnchen): Using pkg/util/iptables
-func ensureIPTablesMasqRule() error {
+func ensureIPTablesMasqRule(e execer) error {
 	// Check if the MASQUERADE rule exist or not
-	if err := exec.Command("iptables",
-		"-t", "nat",
-		"-C", "POSTROUTING",
-		"!", "-d", "10.0.0.0/8",
-		"-m", "addrtype", "!", "--dst-type", "LOCAL",
-		"-j", "MASQUERADE").Run(); err == nil {
+	if err := e.execCmd("iptables", iptablesMasqCheck...); err == nil {
 		// The MASQUERADE rule exists
 		return nil
 	}
 
 	glog.Infof("MASQUERADE rule doesn't exist, recreate it")
-	if err := exec.Command("iptables",
-		"-t", "nat",
-		"-A", "POSTROUTING",
-		"!", "-d", "10.0.0.0/8",
-		"-m", "addrtype", "!", "--dst-type", "LOCAL",
-		"-j", "MASQUERADE").Run(); err != nil {
+	if err := e.execCmd("iptables", iptablesMasqAppend...); err != nil {
 		return err
 	}
 	return nil

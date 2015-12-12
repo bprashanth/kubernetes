@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -46,6 +47,7 @@ import (
 	"k8s.io/kubernetes/pkg/kubelet/container"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
 	"k8s.io/kubernetes/pkg/kubelet/network"
+	"k8s.io/kubernetes/pkg/kubelet/network/cni"
 	"k8s.io/kubernetes/pkg/kubelet/pleg"
 	kubepod "k8s.io/kubernetes/pkg/kubelet/pod"
 	"k8s.io/kubernetes/pkg/kubelet/prober"
@@ -4176,5 +4178,87 @@ func TestGetPodsToSync(t *testing.T) {
 
 	} else {
 		t.Errorf("expected %d pods to sync, got %d", 3, len(podsToSync))
+	}
+}
+
+// fakeExecer implements execer for testing.
+type fakeExecer struct {
+	Cmd map[string][]string
+	Err error
+}
+
+func (f fakeExecer) execCmd(name string, args ...string) error {
+	f.Cmd[name] = args
+	log.Printf("Fake execer %v: %v, err %v", name, args, f.Err)
+	return f.Err
+}
+
+type fakeBridgeNetworkPlugin struct {
+	podCIDR string
+}
+
+func (f *fakeBridgeNetworkPlugin) Init(host network.Host) error {
+	return nil
+}
+
+func (f *fakeBridgeNetworkPlugin) SetUpPod(namespace string, name string, podInfraContainerID kubetypes.DockerID) error {
+	return nil
+}
+
+func (f *fakeBridgeNetworkPlugin) TearDownPod(namespace string, name string, podInfraContainerID kubetypes.DockerID) error {
+	return nil
+}
+
+func (f *fakeBridgeNetworkPlugin) Status(namespace string, name string, podInfraContainerID kubetypes.DockerID) (*network.PodNetworkStatus, error) {
+	return nil, nil
+}
+
+func (f *fakeBridgeNetworkPlugin) ReloadConf(ncw network.NetConfWriter) error {
+	// TODO: Remove casting by giving the BridgeNetConf an io.Writer.
+	f.podCIDR = ncw.(*cni.BridgeNetConf).PodCIDR
+	return nil
+}
+
+func (f *fakeBridgeNetworkPlugin) Name() string {
+	return ""
+}
+
+func TestSyncNetworkStatus(t *testing.T) {
+	testKubelet := newTestKubelet(t)
+	kubelet := testKubelet.kubelet
+	kubelet.configureCBR0 = true
+	kubelet.flannelExperimentalOverlay = false
+	kubelet.networkPluginName = fmt.Sprintf("%v/%v", network.KubernetesPluginPrefix, network.KubeletDefaultPluginName)
+	fBridge := &fakeBridgeNetworkPlugin{}
+	kubelet.networkPlugin = fBridge
+	fe := fakeExecer{Cmd: map[string][]string{}, Err: fmt.Errorf("Error to test iptables appending.")}
+
+	currTime := time.Now()
+	kubelet.runtimeState.clock = &util.FakeClock{currTime}
+	kubelet.runtimeState.lastBaseRuntimeSync = currTime
+
+	kubelet.syncNetworkStatus(fe)
+	if len(kubelet.runtimeState.errors()) == 0 {
+		t.Fatalf("Expected error since podCIDR is not set")
+	}
+	executedCmd := fe.Cmd["iptables"]
+	if !reflect.DeepEqual(executedCmd, iptablesMasqAppend) {
+		t.Fatalf("Unexpected iptables rule: %v", executedCmd)
+	}
+
+	podCIDR := "10.240.1.0/24"
+	kubelet.runtimeState.setPodCIDR(podCIDR)
+	fe = fakeExecer{Cmd: map[string][]string{}, Err: nil}
+	kubelet.syncNetworkStatus(fe)
+	errors := kubelet.runtimeState.errors()
+	if len(errors) != 0 {
+		t.Fatalf("Did not expece errors, got %v", errors)
+	}
+	if fBridge.podCIDR != podCIDR {
+		t.Fatalf("Bridge plugin got %v podCIDR, expeceted %v", fBridge.podCIDR, podCIDR)
+	}
+	executedCmd = fe.Cmd["iptables"]
+	if !reflect.DeepEqual(executedCmd, iptablesMasqCheck) {
+		t.Fatalf("Unexpected iptables rule: %v", executedCmd)
 	}
 }

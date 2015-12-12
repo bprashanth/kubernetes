@@ -18,6 +18,7 @@ package kubelet
 
 import (
 	"fmt"
+	"os/exec"
 
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/capabilities"
@@ -107,4 +108,18 @@ func allowHostIPC(pod *api.Pod) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// execer is an interface to abstract os exec for testing.
+type execer interface {
+	// execCmd takes args as given to exec.Command and returns and error, like
+	// exec.Cmd.Run()
+	execCmd(name string, args ...string) error
+}
+
+// execerImpl implements execer
+type execerImpl struct{}
+
+func (e execerImpl) execCmd(name string, args ...string) error {
+	return exec.Command(name, args...).Run()
 }
