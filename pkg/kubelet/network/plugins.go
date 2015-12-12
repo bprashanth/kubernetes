@@ -31,7 +31,34 @@ import (
 	"k8s.io/kubernetes/pkg/util/validation"
 )
 
-const DefaultPluginName = "kubernetes.io/no-op"
+const (
+	CNIPluginName  = "cni"
+	NoOpPluginName = "kubernetes.io/no-op"
+
+	// Values for kubernetes.io/<name> as specified through the Kubelet's
+	// --network-plugin-name field.
+	KubernetesPluginPrefix   = "net.alpha.kubernetes.io"
+	BridgePluginName         = "bridge"
+	FlannelPluginName        = "flannel"
+	KubeletDefaultPluginName = "default"
+
+	DefaultNetConfFile = "kubernetes-network.conf"
+	// String used to detect docker host networking. Must match the value
+	// returned by docker inspect -f '{{.HostConfig.NetworkMode}}'.
+	// TODO: Re-use a value from the Kubernetes/kubelet/docker.
+	HostNetworking = "host"
+)
+
+// GetPluginType returns the string after the second '/' in the default
+// plugin name passed to the kubelet. This hack is so we can avoid defining
+// more command line flags but still get configurability.
+func GetPluginType(pluginName string) string {
+	parts := strings.Split(pluginName, "/")
+	if len(parts) == 2 && parts[0] == KubernetesPluginPrefix {
+		return parts[1]
+	}
+	return ""
+}
 
 // Plugin is an interface to network plugins for the kubelet
 type NetworkPlugin interface {
@@ -53,6 +80,15 @@ type NetworkPlugin interface {
 
 	// Status is the method called to obtain the ipv4 or ipv6 addresses of the container
 	Status(namespace string, name string, podInfraContainerID kubetypes.DockerID) (*PodNetworkStatus, error)
+
+	// ReloadConf reloads network configuration from the given confDir.
+	ReloadConf(ncw NetConfWriter) error
+}
+
+// NetConfWriter knows how to write out network configuration.
+type NetConfWriter interface {
+	// Write writes the network conf to the given confDir.
+	Write(confDir string) error
 }
 
 // PodNetworkStatus stores the network status of a pod (currently just the primary IP address)
@@ -131,7 +167,7 @@ func (plugin *noopNetworkPlugin) Init(host Host) error {
 }
 
 func (plugin *noopNetworkPlugin) Name() string {
-	return DefaultPluginName
+	return NoOpPluginName
 }
 
 func (plugin *noopNetworkPlugin) SetUpPod(namespace string, name string, id kubetypes.DockerID) error {
@@ -144,4 +180,8 @@ func (plugin *noopNetworkPlugin) TearDownPod(namespace string, name string, id k
 
 func (plugin *noopNetworkPlugin) Status(namespace string, name string, id kubetypes.DockerID) (*PodNetworkStatus, error) {
 	return nil, nil
+}
+
+func (plugin *noopNetworkPlugin) ReloadConf(ncw NetConfWriter) error {
+	return nil
 }
