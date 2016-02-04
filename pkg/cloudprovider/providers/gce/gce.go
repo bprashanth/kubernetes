@@ -431,7 +431,7 @@ func isHTTPErrorCode(err error, code int) bool {
 // new load balancers and updating existing load balancers, recognizing when
 // each is needed.
 func (gce *GCECloud) EnsureLoadBalancer(name, region string, requestedIP net.IP, ports []*api.ServicePort, hostNames []string, affinityType api.ServiceAffinity) (*api.LoadBalancerStatus, error) {
-	glog.V(2).Infof("EnsureLoadBalancer(%v, %v, %v, %v, %v)", name, region, requestedIP, ports, hostNames)
+	glog.V(2).Infof("(svc)EnsureLoadBalancer(%v, %v, %v, %v, %v)", name, region, requestedIP, ports, hostNames)
 
 	if len(hostNames) == 0 {
 		return nil, fmt.Errorf("Cannot EnsureLoadBalancer() with no hosts")
@@ -953,18 +953,27 @@ func (gce *GCECloud) UpdateLoadBalancer(name, region string, hostNames []string)
 
 // EnsureLoadBalancerDeleted is an implementation of LoadBalancer.EnsureLoadBalancerDeleted.
 func (gce *GCECloud) EnsureLoadBalancerDeleted(name, region string) error {
+	glog.Infof("(svc) deleting loadbalancer %v %v", name, region)
 	err := utilerrors.AggregateGoroutines(
-		func() error { return gce.deleteFirewall(name, region) },
+		func() error {
+			glog.Infof("(svc) deleting firewall %v %v", name, region)
+			return gce.deleteFirewall(name, region)
+		},
 		// Even though we don't hold on to static IPs for load balancers, it's
 		// possible that EnsureLoadBalancer left one around in a failed
 		// creation/update attempt, so make sure we clean it up here just in case.
-		func() error { return gce.deleteStaticIP(name, region) },
+		func() error {
+			glog.Infof("(svc) deleting static ip %v %v", name, region)
+			return gce.deleteStaticIP(name, region)
+		},
 		func() error {
 			// The forwarding rule must be deleted before either the target pool can,
 			// unfortunately, so we have to do these two serially.
+			glog.Infof("(svc) deleting forwarding rule %v %v", name, region)
 			if err := gce.deleteForwardingRule(name, region); err != nil {
 				return err
 			}
+			glog.Infof("(svc) deleting target pool %v %v", name, region)
 			if err := gce.deleteTargetPool(name, region); err != nil {
 				return err
 			}
@@ -972,6 +981,7 @@ func (gce *GCECloud) EnsureLoadBalancerDeleted(name, region string) error {
 		},
 	)
 	if err != nil {
+		glog.Infof("(svc) error during delete %v", err)
 		return utilerrors.Flatten(err)
 	}
 	return nil

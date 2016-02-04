@@ -135,7 +135,7 @@ func (s *ServiceController) Run(serviceSyncPeriod, nodeSyncPeriod time.Duration)
 		s.cache,
 	)
 	lw := cache.NewListWatchFromClient(s.kubeClient.(*clientset.Clientset).LegacyClient, "services", api.NamespaceAll, fields.Everything())
-	cache.NewReflector(lw, &api.Service{}, serviceQueue, serviceSyncPeriod).Run()
+	cache.NewReflector(lw, &api.Service{}, serviceQueue, 10*time.Second).Run()
 	for i := 0; i < workerGoroutines; i++ {
 		go s.watchServices(serviceQueue)
 	}
@@ -175,21 +175,21 @@ func (s *ServiceController) watchServices(serviceQueue *cache.DeltaFIFO) {
 		newItem := serviceQueue.Pop()
 		deltas, ok := newItem.(cache.Deltas)
 		if !ok {
-			glog.Errorf("Received object from service watcher that wasn't Deltas: %+v", newItem)
+			glog.Errorf("(svc)Received object from service watcher that wasn't Deltas: %+v", newItem)
 		}
 		delta := deltas.Newest()
 		if delta == nil {
-			glog.Errorf("Received nil delta from watcher queue.")
+			glog.Errorf("(svc)Received nil delta from watcher queue.")
 			continue
 		}
 		err, shouldRetry := s.processDelta(delta)
 		if shouldRetry {
 			// Add the failed service back to the queue so we'll retry it.
-			glog.Errorf("Failed to process service delta. Retrying: %v", err)
+			glog.Errorf("(svc)Failed to process service delta. Retrying: %v", err)
 			time.Sleep(processingRetryInterval)
 			serviceQueue.AddIfNotPresent(deltas)
 		} else if err != nil {
-			runtime.HandleError(fmt.Errorf("Failed to process service delta. Not retrying: %v", err))
+			runtime.HandleError(fmt.Errorf("(svc)Failed to process service delta. Not retrying: %v", err))
 		}
 	}
 }
@@ -207,6 +207,8 @@ func (s *ServiceController) processDelta(delta *cache.Delta) (error, bool) {
 		key, ok := delta.Object.(cache.DeletedFinalStateUnknown)
 		if !ok {
 			return fmt.Errorf("Delta contained object that wasn't a service or a deleted key: %+v", delta), notRetryable
+		} else {
+			glog.Infof("(svc)Tombstone key %+v object %+v", key, delta.Object)
 		}
 		cachedService, ok = s.cache.get(key.Key)
 		if !ok {
@@ -220,12 +222,16 @@ func (s *ServiceController) processDelta(delta *cache.Delta) (error, bool) {
 		namespacedName.Name = service.Name
 		cachedService = s.cache.getOrCreate(namespacedName.String())
 	}
-	glog.V(2).Infof("Got new %s delta for service: %+v", delta.Type, service)
 
 	// Ensure that no other goroutine will interfere with our processing of the
 	// service.
 	cachedService.mu.Lock()
 	defer cachedService.mu.Unlock()
+	if cachedService.appliedState != nil {
+		glog.V(2).Infof("(svc)Got new %s delta for service: %+v. Old Service type %v status %+v", delta.Type, service, cachedService.appliedState.Spec.Type, cachedService.appliedState.Status)
+	} else {
+		glog.V(2).Infof("(svc)Got new %s delta for service: %+v. No applied state", delta.Type, service)
+	}
 
 	// Update the cached service (used above for populating synthetic deletes)
 	cachedService.lastState = service
@@ -237,6 +243,9 @@ func (s *ServiceController) processDelta(delta *cache.Delta) (error, bool) {
 	case cache.Updated:
 		fallthrough
 	case cache.Sync:
+		if cachedService.appliedState != nil {
+			glog.Infof("(svc:Delta) got sync delta for svc %v, type %v -> %v", service.Name, service.Spec.Type, cachedService.appliedState.Spec.Type)
+		}
 		err, retry := s.createLoadBalancerIfNeeded(namespacedName, service, cachedService.appliedState)
 		if err != nil {
 			message := "Error creating load balancer"
@@ -256,6 +265,9 @@ func (s *ServiceController) processDelta(delta *cache.Delta) (error, bool) {
 		cachedService.appliedState = service
 		s.cache.set(namespacedName.String(), cachedService)
 	case cache.Deleted:
+		if cachedService.appliedState != nil {
+			glog.Infof("(svc:Delta) got delete delta for svc %v, type %v -> %v", service.Name, service.Spec.Type, cachedService.appliedState.Spec.Type)
+		}
 		s.eventRecorder.Event(service, api.EventTypeNormal, "DeletingLoadBalancer", "Deleting load balancer")
 		err := s.balancer.EnsureLoadBalancerDeleted(s.loadBalancerName(service), s.zone.Region)
 		if err != nil {
@@ -266,7 +278,7 @@ func (s *ServiceController) processDelta(delta *cache.Delta) (error, bool) {
 		s.eventRecorder.Event(service, api.EventTypeNormal, "DeletedLoadBalancer", "Deleted load balancer")
 		s.cache.delete(namespacedName.String())
 	default:
-		glog.Errorf("Unexpected delta type: %v", delta.Type)
+		glog.Errorf("(svc) Unexpected delta type: %v", delta.Type)
 	}
 	return nil, notRetryable
 }
@@ -274,8 +286,8 @@ func (s *ServiceController) processDelta(delta *cache.Delta) (error, bool) {
 // Returns whatever error occurred along with a boolean indicator of whether it
 // should be retried.
 func (s *ServiceController) createLoadBalancerIfNeeded(namespacedName types.NamespacedName, service, appliedState *api.Service) (error, bool) {
-	if appliedState != nil && !needsUpdate(appliedState, service) {
-		glog.Infof("LB already exists and doesn't need update for service %s", namespacedName)
+	if appliedState != nil && !s.needsUpdate(appliedState, service) {
+		glog.Infof("(svc)LB already exists and doesn't need update for service %s", namespacedName)
 		return nil, notRetryable
 	}
 
@@ -305,7 +317,7 @@ func (s *ServiceController) createLoadBalancerIfNeeded(namespacedName types.Name
 		}
 
 		if needDelete {
-			glog.Infof("Deleting existing load balancer for service %s that no longer needs a load balancer.", namespacedName)
+			glog.Infof("(svc)Deleting existing load balancer for service %s that no longer needs a load balancer.", namespacedName)
 			s.eventRecorder.Event(service, api.EventTypeNormal, "DeletingLoadBalancer", "Deleting load balancer")
 			if err := s.balancer.EnsureLoadBalancerDeleted(s.loadBalancerName(service), s.zone.Region); err != nil {
 				return err, retryable
@@ -330,6 +342,7 @@ func (s *ServiceController) createLoadBalancerIfNeeded(namespacedName types.Name
 
 	// Write the state if changed
 	// TODO: Be careful here ... what if there were other changes to the service?
+	glog.Infof("(svc) checking status for update previous %+v current %+v", previousState, service.Status.LoadBalancer)
 	if !api.LoadBalancerStatusEqual(previousState, &service.Status.LoadBalancer) {
 		if err := s.persistUpdate(service); err != nil {
 			return fmt.Errorf("Failed to persist updated status to apiserver, even after retries. Giving up: %v", err), notRetryable
@@ -439,6 +452,7 @@ func (s *serviceCache) getOrCreate(serviceName string) *cachedService {
 	defer s.mu.Unlock()
 	service, ok := s.serviceMap[serviceName]
 	if !ok {
+		glog.Infof("(svc) Creating new cache entry for %v", serviceName)
 		service = &cachedService{}
 		s.serviceMap[serviceName] = service
 	}
@@ -457,24 +471,32 @@ func (s *serviceCache) delete(serviceName string) {
 	delete(s.serviceMap, serviceName)
 }
 
-func needsUpdate(oldService *api.Service, newService *api.Service) bool {
+func (s *ServiceController) needsUpdate(oldService *api.Service, newService *api.Service) bool {
 	if !wantsLoadBalancer(oldService) && !wantsLoadBalancer(newService) {
+		glog.Infof("(svc) neither old or new service wants lb %v/%v", newService.Namespace, newService.Name)
 		return false
 	}
 	if wantsLoadBalancer(oldService) != wantsLoadBalancer(newService) {
+		s.eventRecorder.Eventf(newService, api.EventTypeNormal, "Type", "%v -> %v",
+			oldService.Spec.Type, newService.Spec.Type)
 		return true
 	}
 	if !portsEqualForLB(oldService, newService) || oldService.Spec.SessionAffinity != newService.Spec.SessionAffinity {
 		return true
 	}
 	if !loadBalancerIPsAreEqual(oldService, newService) {
+		s.eventRecorder.Eventf(newService, api.EventTypeNormal, "Loadbalancer IP", "%v -> %v",
+			oldService.Spec.LoadBalancerIP, newService.Spec.LoadBalancerIP)
 		return true
 	}
 	if len(oldService.Spec.ExternalIPs) != len(newService.Spec.ExternalIPs) {
+		s.eventRecorder.Eventf(newService, api.EventTypeNormal, "External IP count", "%v -> %v",
+			len(oldService.Spec.ExternalIPs), len(newService.Spec.ExternalIPs))
 		return true
 	}
 	for i := range oldService.Spec.ExternalIPs {
 		if oldService.Spec.ExternalIPs[i] != newService.Spec.ExternalIPs[i] {
+			s.eventRecorder.Eventf(newService, api.EventTypeNormal, "Add external IP", newService.Spec.ExternalIPs[i])
 			return true
 		}
 	}
