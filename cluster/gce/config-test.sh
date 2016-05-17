@@ -156,3 +156,6 @@ HAIRPIN_MODE="${HAIRPIN_MODE:-promiscuous-bridge}" # promiscuous-bridge, hairpin
 
 # Optional: if set to true, kube-up will configure the cluster to run e2e tests.
 E2E_STORAGE_TEST_ENVIRONMENT=${KUBE_E2E_STORAGE_TEST_ENVIRONMENT:-false}
+
+# A list of images to pre-pull for the e2e, #25277
+E2E_IMAGE_LIST=${E2E_IMAGE_LIST:$(grep -Iiroh "gcr.io/.*" /usr/local/google/home/beeps/goproj/src/k8s.io/kubernetes/test/e2e | sed -e "s/[,\")}]//g" | awk '{print $1}' | sort | uniq)}

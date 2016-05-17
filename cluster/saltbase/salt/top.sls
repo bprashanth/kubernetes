@@ -76,7 +76,7 @@ base:
     - docker
     - kubelet
 {% endif %}
-{% if grains['e2e_image_list'] is defined %}
+{% if pillar.get('e2e_image_list', '').lower() != '' %}
     - e2e-image-puller
 {% endif %}
 {% if pillar.get('network_provider', '').lower() == 'opencontrail' %}
