@@ -1,0 +1,36 @@
+{% set e2e_image_list = "" -%}
+{% if pillar['e2e_image_list'] is defined -%}
+  {% set e2e_image_list = pillar['e2e_image_list'] -%}
+{% endif -%}
+
+# kube-proxy podspec
+apiVersion: v1
+kind: Pod
+metadata:
+  name: e2e-image-puller
+  namespace: kube-system
+  labels:
+    component: e2e
+spec:
+  containers:
+  - name: image-puller
+    image: busybox
+    command:
+    - /bin/sh
+    - -c
+    - for i in $({{e2e_image_list}}); do echo pulling $i; docker pull $i; done;
+    securityContext:
+      privileged: true
+    volumeMounts:
+    - mountPath: /var/run/docker.sock
+      name: socket
+    - mountPath: /usr/bin/docker
+      name: docker
+  volumes:
+  - hostPath:
+      path: /var/run/docker.sock
+    name: socket
+  - hostPath:
+      path: /usr/bin/docker
+    name: docker
+  restartPolicy: OnFailure
