@@ -19,6 +19,9 @@ package dns
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"github.com/golang/glog"
+	skymsg "github.com/skynetservices/skydns/msg"
 	"strings"
 )
 
@@ -49,8 +52,16 @@ func (cache *TreeCache) Serialize() (string, error) {
 	return string(prettyJSON.Bytes()), nil
 }
 
-func (cache *TreeCache) setEntry(key string, val interface{}, path ...string) {
+func (cache *TreeCache) setEntry(key string, val *skymsg.Service, etcdKey string, path ...string) {
+	// TODO: Consolidate setEntry and setSubCache into a single method with a
+	// type switch.
+	// TODO: Insted of passing the etcdKey as an argument, we can reconstruct
+	// it from the path, provided callers always pass the full path to the
+	// object. This is currently *not* the case, since callers first create
+	// a new, empty node, populate it, then parent it under the right path.
+	// So we don't know the full key till the final parenting operation.
 	node := cache.ensureChildNode(path...)
+	val.Key = fmt.Sprintf("%v/%v%v", etcdKey, strings.Join(path, "/"), key)
 	node.Entries[key] = val
 }
 
@@ -76,8 +87,8 @@ func (cache *TreeCache) getEntry(key string, path ...string) (interface{}, bool)
 	return val, ok
 }
 
-func (cache *TreeCache) getValuesForPathWithWildcards(path ...string) []interface{} {
-	retval := []interface{}{}
+func (cache *TreeCache) getValuesForPathWithWildcards(path ...string) []*skymsg.Service {
+	retval := []*skymsg.Service{}
 	nodesToExplore := []*TreeCache{cache}
 	for idx, subpath := range path {
 		nextNodesToExplore := []*TreeCache{}
@@ -88,7 +99,7 @@ func (cache *TreeCache) getValuesForPathWithWildcards(path ...string) []interfac
 					nextNodesToExplore = append(nextNodesToExplore, node)
 				} else {
 					if val, ok := node.Entries[subpath]; ok {
-						retval = append(retval, val)
+						retval = append(retval, val.(*skymsg.Service))
 					} else {
 						childNode := node.ChildNodes[subpath]
 						if childNode != nil {
@@ -122,10 +133,9 @@ func (cache *TreeCache) getValuesForPathWithWildcards(path ...string) []interfac
 
 	for _, node := range nodesToExplore {
 		for _, val := range node.Entries {
-			retval = append(retval, val)
+			retval = append(retval, val.(*skymsg.Service))
 		}
 	}
-
 	return retval
 }
 
@@ -176,6 +186,20 @@ func (cache *TreeCache) ensureChildNode(path ...string) *TreeCache {
 		childNode = newNode
 	}
 	return childNode
+}
+
+// printTreeCache prints the given tree cache.
+func printTreeCache(path string, c *TreeCache) {
+	if c == nil {
+		return
+	}
+	glog.Infof("Printing all entries of %v", path)
+	for k, e := range c.Entries {
+		glog.V(4).Infof("\t%v:%+v", k, e.(*skymsg.Service))
+	}
+	for k, v := range c.ChildNodes {
+		printTreeCache(k, v)
+	}
 }
 
 // unused function. keeping it around in commented-fashion

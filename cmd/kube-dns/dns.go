@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	go_flag "flag"
 	"github.com/spf13/pflag"
 	"k8s.io/kubernetes/cmd/kube-dns/app"
 	"k8s.io/kubernetes/cmd/kube-dns/app/options"
@@ -25,11 +26,19 @@ import (
 	"k8s.io/kubernetes/pkg/version/verflag"
 )
 
+// No point piping this flag all around when what we really want is to just set
+// the global verbosity level.
+var logVerbosity = pflag.Bool("verbose-logs", false, "If set, logs are written at V(4), otherwise V(2).")
+
 func main() {
 	config := options.NewKubeDNSConfig()
 	config.AddFlags(pflag.CommandLine)
 
 	flag.InitFlags()
+	if *logVerbosity {
+		go_flag.Lookup("logtostderr").Value.Set("true")
+		go_flag.Set("v", "4")
+	}
 	util.InitLogs()
 	defer util.FlushLogs()
 

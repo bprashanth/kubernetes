@@ -17,17 +17,22 @@ limitations under the License.
 package dns
 
 import (
+	"encoding/json"
 	"fmt"
 	"net"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/miekg/dns"
 	skymsg "github.com/skynetservices/skydns/msg"
+	skyServer "github.com/skynetservices/skydns/server"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	kapi "k8s.io/kubernetes/pkg/api"
+	endpointsapi "k8s.io/kubernetes/pkg/api/endpoints"
 	"k8s.io/kubernetes/pkg/client/cache"
+	"k8s.io/kubernetes/pkg/util/sets"
 )
 
 const (
@@ -99,7 +104,106 @@ func TestNamedSinglePortService(t *testing.T) {
 	assertNoSRVForNamedPort(t, kd, s, portName2)
 }
 
-func TestHeadlessService(t *testing.T) {
+func assertARecordsMatchIPs(t *testing.T, records []dns.RR, ips ...string) {
+	expectedEndpoints := sets.NewString(ips...)
+	gotEndpoints := sets.NewString()
+	for _, r := range records {
+		if a, ok := r.(*dns.A); !ok {
+			t.Errorf("Expected A record, got %+v", a)
+		} else {
+			gotEndpoints.Insert(a.A.String())
+		}
+	}
+	if !gotEndpoints.Equal(expectedEndpoints) {
+		t.Errorf("Expected %v got %v", expectedEndpoints, gotEndpoints)
+	}
+}
+
+func assertSRVRecordsMatchTarget(t *testing.T, records []dns.RR, targets ...string) {
+	expectedTargets := sets.NewString(targets...)
+	gotTargets := sets.NewString()
+	for _, r := range records {
+		if srv, ok := r.(*dns.SRV); !ok {
+			t.Errorf("Expected SRV record, got %+v", srv)
+		} else {
+			gotTargets.Insert(srv.Target)
+		}
+	}
+	if !gotTargets.Equal(expectedTargets) {
+		t.Errorf("Expected %v got %v", expectedTargets, gotTargets)
+	}
+}
+
+func TestSkySimpleSRVLookup(t *testing.T) {
+	kd := newKubeDNS()
+	skydnsConfig := &skyServer.Config{Domain: testDomain, DnsAddr: "0.0.0.0:53"}
+	skyServer.SetDefaults(skydnsConfig)
+	s := skyServer.New(kd, skydnsConfig)
+
+	service := newHeadlessService()
+	endpointIPs := []string{"10.0.0.1", "10.0.0.2"}
+	endpoints := newEndpoints(service, newSubsetWithOnePort("", 80, endpointIPs...))
+	assert.NoError(t, kd.endpointsStore.Add(endpoints))
+	kd.newService(service)
+
+	name := strings.Join([]string{testService, testNamespace, "svc", testDomain}, ".")
+	question := dns.Question{Name: name, Qtype: dns.TypeSRV, Qclass: dns.ClassINET}
+
+	rec, extra, err := s.SRVRecords(question, name, 512, false)
+	if err != nil {
+		t.Fatalf("Failed srv record lookup on service with fqdn %v", name)
+	}
+	assertARecordsMatchIPs(t, extra, endpointIPs...)
+	targets := []string{}
+	for _, eip := range endpointIPs {
+		// A portal service is always created with a port of '0'
+		targets = append(targets, fmt.Sprintf("%v.%v", hashServiceRecord(newServiceRecord(eip, 0)), name))
+	}
+	assertSRVRecordsMatchTarget(t, rec, targets...)
+}
+
+func TestSkyPodHostnameSRVLookup(t *testing.T) {
+	kd := newKubeDNS()
+	skydnsConfig := &skyServer.Config{Domain: testDomain, DnsAddr: "0.0.0.0:53"}
+	skyServer.SetDefaults(skydnsConfig)
+	s := skyServer.New(kd, skydnsConfig)
+
+	service := newHeadlessService()
+	endpointIPs := []string{"10.0.0.1", "10.0.0.2"}
+	endpoints := newEndpoints(service, newSubsetWithOnePort("", 80, endpointIPs...))
+
+	// The format of thes annotations is:
+	// endpoints.beta.kubernetes.io/hostnames-map: '{"ep-ip":{"HostName":"pod request hostname"}}'
+	epRecords := map[string]endpointsapi.HostRecord{}
+	for i, ep := range endpointIPs {
+		epRecords[ep] = endpointsapi.HostRecord{fmt.Sprintf("ep-%d", i)}
+	}
+	b, err := json.Marshal(epRecords)
+	if err != nil {
+		t.Fatalf("%v", err)
+	}
+	endpoints.Annotations = map[string]string{
+		endpointsapi.PodHostnamesAnnotation: string(b),
+	}
+	assert.NoError(t, kd.endpointsStore.Add(endpoints))
+	t.Logf("Endpoint annotations %+v", endpoints.Annotations)
+	kd.newService(service)
+	name := strings.Join([]string{testService, testNamespace, "svc", testDomain}, ".")
+	question := dns.Question{Name: name, Qtype: dns.TypeSRV, Qclass: dns.ClassINET}
+
+	rec, _, err := s.SRVRecords(question, name, 512, false)
+	if err != nil {
+		t.Fatalf("Failed srv record lookup on service with fqdn %v", name)
+	}
+	targets := []string{}
+	for i := range endpointIPs {
+		// A portal service is always created with a port of '0'
+		targets = append(targets, fmt.Sprintf("%v.%v", fmt.Sprintf("ep-%d", i), name))
+	}
+	assertSRVRecordsMatchTarget(t, rec, targets...)
+}
+
+func TestSimpleHeadlessService(t *testing.T) {
 	kd := newKubeDNS()
 	s := newHeadlessService()
 	assert.NoError(t, kd.servicesStore.Add(s))

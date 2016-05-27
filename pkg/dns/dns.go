@@ -49,6 +49,15 @@ const (
 
 	// Resync period for the kube controller loop.
 	resyncPeriod = 5 * time.Minute
+
+	// default priority used for service records
+	defaultPriority = 10
+
+	// default weight used for service records
+	defaultWeight = 10
+
+	// default TTL used for service records
+	defaultTTL = 30
 )
 
 type KubeDNS struct {
@@ -126,6 +135,11 @@ func (kd *KubeDNS) waitForKubernetesService() (svc *kapi.Service) {
 	return
 }
 
+// PrintTreeCache prints the tree cache maintained by this instance.
+func (kd *KubeDNS) PrintCache() {
+	printTreeCache("", kd.cache)
+}
+
 func (kd *KubeDNS) GetCacheAsJSON() (string, error) {
 	kd.cacheLock.RLock()
 	defer kd.cacheLock.RUnlock()
@@ -176,6 +190,7 @@ func assertIsService(obj interface{}) (*kapi.Service, bool) {
 
 func (kd *KubeDNS) newService(obj interface{}) {
 	if service, ok := assertIsService(obj); ok {
+		glog.V(4).Infof("Add/Updated for service %v", service.Name)
 		// if ClusterIP is not set, a DNS entry should not be created
 		if !kapi.IsServiceIPSet(service) {
 			kd.newHeadlessService(service)
@@ -238,17 +253,22 @@ func (kd *KubeDNS) getServiceFromEndpoints(e *kapi.Endpoints) (*kapi.Service, er
 	return nil, fmt.Errorf("got a non service object in services store %v", obj)
 }
 
+func etcdKey(subPaths ...string) string {
+	return fmt.Sprintf("/skydns/%v", strings.Join(subPaths, "/"))
+}
+
 func (kd *KubeDNS) newPortalService(service *kapi.Service) {
 	subCache := NewTreeCache()
 	recordValue, recordLabel := getSkyMsg(service.Spec.ClusterIP, 0)
-	subCache.setEntry(recordLabel, recordValue)
+	treePath := etcdKey(append(kd.domainPath, serviceSubdomain, service.Namespace, service.Name)...)
+	subCache.setEntry(recordLabel, recordValue, treePath)
 
 	// Generate SRV Records
 	for i := range service.Spec.Ports {
 		port := &service.Spec.Ports[i]
 		if port.Name != "" && port.Protocol != "" {
 			srvValue := kd.generateSRVRecordValue(service, int(port.Port))
-			subCache.setEntry(recordLabel, srvValue, "_"+strings.ToLower(string(port.Protocol)), "_"+port.Name)
+			subCache.setEntry(recordLabel, srvValue, treePath, "_"+strings.ToLower(string(port.Protocol)), "_"+port.Name)
 		}
 	}
 	subCachePath := append(kd.domainPath, serviceSubdomain, service.Namespace)
@@ -264,6 +284,7 @@ func (kd *KubeDNS) generateRecordsForHeadlessService(e *kapi.Endpoints, svc *kap
 		return err
 	}
 	subCache := NewTreeCache()
+	treePath := etcdKey(append(kd.domainPath, serviceSubdomain, svc.Namespace, svc.Name)...)
 	glog.V(4).Infof("Endpoints Annotations: %v", e.Annotations)
 	for idx := range e.Subsets {
 		for subIdx := range e.Subsets[idx].Addresses {
@@ -273,12 +294,12 @@ func (kd *KubeDNS) generateRecordsForHeadlessService(e *kapi.Endpoints, svc *kap
 			if hostLabel, exists := getHostname(address, podHostnames); exists {
 				endpointName = hostLabel
 			}
-			subCache.setEntry(endpointName, recordValue)
+			subCache.setEntry(endpointName, recordValue, treePath)
 			for portIdx := range e.Subsets[idx].Ports {
 				endpointPort := &e.Subsets[idx].Ports[portIdx]
 				if endpointPort.Name != "" && endpointPort.Protocol != "" {
 					srvValue := kd.generateSRVRecordValue(svc, int(endpointPort.Port), endpointName)
-					subCache.setEntry(endpointName, srvValue, "_"+strings.ToLower(string(endpointPort.Protocol)), "_"+endpointPort.Name)
+					subCache.setEntry(endpointName, srvValue, treePath, "_"+strings.ToLower(string(endpointPort.Protocol)), "_"+endpointPort.Name)
 				}
 			}
 		}
@@ -348,8 +369,16 @@ func (kd *KubeDNS) newHeadlessService(service *kapi.Service) error {
 	return nil
 }
 
-func (kd *KubeDNS) Records(name string, exact bool) ([]skymsg.Service, error) {
+func (kd *KubeDNS) Records(name string, exact bool) (retval []skymsg.Service, err error) {
 	glog.Infof("Received DNS Request:%s, exact:%v", name, exact)
+
+	defer func() {
+		if err != nil {
+			glog.V(4).Infof("Record lookup error %v", err)
+			kd.PrintCache()
+		}
+	}()
+
 	trimmed := strings.TrimRight(name, ".")
 	segments := strings.Split(trimmed, ".")
 	path := reverseArray(segments)
@@ -378,9 +407,8 @@ func (kd *KubeDNS) Records(name string, exact bool) ([]skymsg.Service, error) {
 	kd.cacheLock.RLock()
 	defer kd.cacheLock.RUnlock()
 	records := kd.cache.getValuesForPathWithWildcards(path...)
-	retval := []skymsg.Service{}
 	for _, val := range records {
-		retval = append(retval, *(val.(*skymsg.Service)))
+		retval = append(retval, *val)
 	}
 	glog.Infof("records:%v, retval:%v, path:%v", records, retval, path)
 	if len(retval) == 0 {
@@ -428,22 +456,30 @@ func (kd *KubeDNS) getPodIP(path []string) (string, error) {
 	return "", fmt.Errorf("Invalid IP Address %v", ip)
 }
 
-// Returns record in a format that SkyDNS understands.
-// Also return the hash of the record.
-func getSkyMsg(ip string, port int) (*skymsg.Service, string) {
-	msg := &skymsg.Service{
-		Host:     ip,
-		Port:     port,
-		Priority: 10,
-		Weight:   10,
-		Ttl:      30,
-	}
+func hashServiceRecord(msg *skymsg.Service) string {
 	s := fmt.Sprintf("%v", msg)
 	h := fnv.New32a()
 	h.Write([]byte(s))
-	hash := fmt.Sprintf("%x", h.Sum32())
-	glog.Infof("DNS Record:%s, hash:%s", s, hash)
-	return msg, fmt.Sprintf("%x", hash)
+	return fmt.Sprintf("%x", h.Sum32())
+}
+
+func newServiceRecord(ip string, port int) *skymsg.Service {
+	return &skymsg.Service{
+		Host:     ip,
+		Port:     port,
+		Priority: defaultPriority,
+		Weight:   defaultWeight,
+		Ttl:      defaultTTL,
+	}
+}
+
+// Returns record in a format that SkyDNS understands.
+// Also return the hash of the record.
+func getSkyMsg(ip string, port int) (*skymsg.Service, string) {
+	msg := newServiceRecord(ip, port)
+	hash := hashServiceRecord(msg)
+	glog.Infof("DNS Record:%s, hash:%s", fmt.Sprintf("%v", msg), hash)
+	return msg, hash
 }
 
 func reverseArray(arr []string) []string {
