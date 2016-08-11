@@ -25,4 +25,12 @@ const (
 	//
 	// Not all cloud providers support this annotation, though AWS & GCE do.
 	AnnotationLoadBalancerSourceRangesKey = "service.beta.kubernetes.io/load-balancer-source-ranges"
+
+	// The annotation under which we store the one node port used to service
+	// cloud loadbalancer health checks. Kube-proxy responds on this port.
+	HealthCheckNodePortAnnotation = "service.alpha.kubernetes.io/health-check-node-port"
+
+	// The annotation used to indicate that this Service should only proxy to local
+	// endpoints.
+	LocalLbServiceAnnotation = "service.alpha.kubernetes.io/local-lb-service"
 )

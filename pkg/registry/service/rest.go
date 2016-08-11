@@ -28,6 +28,7 @@ import (
 	"k8s.io/kubernetes/pkg/api"
 	"k8s.io/kubernetes/pkg/api/errors"
 	"k8s.io/kubernetes/pkg/api/rest"
+	apiservice "k8s.io/kubernetes/pkg/api/service"
 	"k8s.io/kubernetes/pkg/api/unversioned"
 	"k8s.io/kubernetes/pkg/api/validation"
 	"k8s.io/kubernetes/pkg/registry/endpoint"
@@ -131,6 +132,13 @@ func (rs *REST) Create(ctx api.Context, obj runtime.Object) (runtime.Object, err
 			}
 			servicePort.NodePort = int32(nodePort)
 		}
+	}
+	if shouldAssignHealthCheckNodePort(service) {
+		np, err := nodePortOp.AllocateNext()
+		if err != nil {
+			return nil, errors.NewInternalError(fmt.Errorf("failed to allocate a nodePort: %v", err))
+		}
+		service.Annotations[apiservice.HealthCheckNodePortAnnotation] = strconv.Itoa(np)
 	}
 
 	out, err := rs.registry.CreateService(ctx, service)
@@ -397,4 +405,10 @@ func shouldAssignNodePorts(service *api.Service) bool {
 		glog.Errorf("Unknown service type: %v", service.Spec.Type)
 		return false
 	}
+}
+
+func shouldAssignHealthCheckNodePort(service *api.Service) bool {
+	_, localLbService := service.Annotations[apiservice.LocalLbServiceAnnotation]
+	np, _ := service.Annotations[apiservice.HealthCheckNodePortAnnotation]
+	return service.Spec.Type == api.ServiceTypeLoadBalancer && localLbService && np == ""
 }
