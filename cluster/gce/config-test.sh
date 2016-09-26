@@ -66,7 +66,10 @@ MASTER_IP_RANGE="${MASTER_IP_RANGE:-10.246.0.0/24}"
 RUNTIME_CONFIG="${KUBE_RUNTIME_CONFIG:-}"
 
 # Optional: set feature gates
-FEATURE_GATES="${KUBE_FEATURE_GATES:-}"
+# We enable all alpha featurs by default in e2es so we are immediately aware
+# of unwanted consequences in core parts of the system. The Alpha features
+# themselves are only tested in "[Feature:]" e2es.
+FEATURE_GATES="${KUBE_FEATURE_GATES:-AllAlpha=true}"
 
 TERMINATED_POD_GC_THRESHOLD=${TERMINATED_POD_GC_THRESHOLD:-100}
 

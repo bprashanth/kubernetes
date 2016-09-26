@@ -302,6 +302,7 @@ function start_apiserver {
       --cert-dir="${CERT_DIR}" \
       --service-account-key-file="${SERVICE_ACCOUNT_KEY}" \
       --service-account-lookup="${SERVICE_ACCOUNT_LOOKUP}" \
+      --feature-gates="AllAlpha=true" \
       --admission-control="${ADMISSION_CONTROL}" \
       --bind-address="${API_BIND_ADDR}" \
       --insecure-bind-address="${API_HOST_IP}" \
@@ -332,6 +333,7 @@ function start_controller_manager {
       --enable-hostpath-provisioner="${ENABLE_HOSTPATH_PROVISIONER}" \
       ${node_cidr_args} \
       --pvclaimbinder-sync-period="${CLAIM_BINDER_SYNC_PERIOD}" \
+      --feature-gates="AllAlpha=true" \
       --cloud-provider="${CLOUD_PROVIDER}" \
       --cloud-config="${CLOUD_CONFIG}" \
       --master="${API_HOST}:${API_PORT}" >"${CTLRMGR_LOG}" 2>&1 &
@@ -374,7 +376,7 @@ function start_kubelet {
       if [[ -n "${NET_PLUGIN}" ]]; then
         net_plugin_args="--network-plugin=${NET_PLUGIN}"
       fi
-      
+
       net_plugin_dir_args=""
       if [[ -n "${NET_PLUGIN_DIR}" ]]; then
         net_plugin_dir_args="--network-plugin-dir=${NET_PLUGIN_DIR}"
@@ -422,7 +424,7 @@ function start_kubelet {
       # dockerized kubelet that might be running.
       cleanup_dockerized_kubelet
       cred_bind=""
-      # path to cloud credentails. 
+      # path to cloud credentails.
       cloud_cred=""
       if [ "${CLOUD_PROVIDER}" == "aws" ]; then
           cloud_cred="${HOME}/.aws/credentials"
@@ -459,6 +461,7 @@ function start_kubeproxy {
     sudo -E "${GO_OUT}/hyperkube" proxy \
       --v=${LOG_LEVEL} \
       --hostname-override="${HOSTNAME_OVERRIDE}" \
+      --feature-gates="AllAlpha=true" \
       --master="http://${API_HOST}:${API_PORT}" >"${PROXY_LOG}" 2>&1 &
     PROXY_PID=$!
 
@@ -540,7 +543,7 @@ To start using your cluster, open up another terminal/tab and run:
   cluster/kubectl.sh config use-context local
   cluster/kubectl.sh
 EOF
-else 
+else
   cat <<EOF
 The kubelet was started.
 
@@ -581,7 +584,7 @@ fi
 
 if [[ "${START_MODE}" != "nokubelet" ]]; then
   start_kubelet
-fi  
+fi
 
 print_success
 
